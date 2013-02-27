@@ -624,7 +624,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 				not_temporarly = 0;
 			}
 		}
-	} /* nargs >= 9 */
+ 	} /* nargs >= 9 */
 
 	/* get parameter */
 	table_orig = __table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(0));
