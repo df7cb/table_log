@@ -99,5 +99,38 @@ DROP TABLE test;
 DROP TABLE test_log;
 DROP TABLE test_recover;
 
+-- Check partition support
+CREATE TABLE test(id integer, name text);
+ALTER TABLE test ADD PRIMARY KEY(id);
+SELECT table_log_init(5, 'public', 'test', 'public', 'test', 'PARTITION');
+
+SET table_log.active_partition = 1;
+
+INSERT INTO test VALUES(1, 'joe');
+INSERT INTO test VALUES(2, 'barney');
+INSERT INTO test VALUES(3, 'monica');
+
+SET table_log.active_partition = 2;
+
+UPDATE test SET name = 'veronica' WHERE id = 3;
+DELETE FROM test WHERE id = 1;
+
+SELECT id, name FROM test_v;
+SELECT id, name FROM test_0;
+SELECT id, name FROM test_1;
+
+--
+-- NOTE: since we use partitioning here, we use the special log
+--       view to restore the data with id = 2
+--
+SELECT table_log_restore_table('test', 'id', 'test_v', 'trigger_id', 'test_recover', NOW(), '3', NULL::int, 1);
+SELECT id, name FROM test_recover;
+
+DROP TABLE test;
+DROP VIEW  test_v;
+DROP TABLE test_0;
+DROP TABLE test_1;
+DROP TABLE test_recover;
+
 RESET client_min_messages;
 

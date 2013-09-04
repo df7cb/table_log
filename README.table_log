@@ -170,7 +170,11 @@ The function can be used with the following parameters:
     log the changes in table tableschema.tablename into the log table
     logschema.logname.
 
-
+  table_log_init(ncols, tableschema, tablename, logschema, logname, partition_mode):
+    log the changes in table tableschema.tablename into the log table
+    logschema.logname. The parameter partition_mode can be SINGLE or PARTITION, which
+    creates two log tables *_0 and *_1 which can be switched by setting
+    table_log.active_partition to the corresponding partition id 1 or 2.
 
 4.1. Manual table log and trigger creation
 

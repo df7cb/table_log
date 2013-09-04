@@ -21,8 +21,9 @@
 #include "mb/pg_wchar.h"	/* support for the quoting functions */
 #include "miscadmin.h"
 #include "lib/stringinfo.h"
-#include "utils/formatting.h"
 #include "utils/builtins.h"
+#include "utils/formatting.h"
+#include "utils/guc.h"
 #include <utils/lsyscache.h>
 #include <utils/rel.h>
 #include <utils/timestamp.h>
@@ -42,6 +43,14 @@ PG_MODULE_MAGIC;
 #define PG_NARGS() (fcinfo->nargs)
 #endif
 
+/*
+ * Current active log table partition. Default is always one,
+ * so that in case no partitioning is used always a single table
+ * is our log target.
+ */
+TableLogPartitionId tableLogActivePartitionId = 1;
+
+void _PG_init(void);
 extern Datum table_log(PG_FUNCTION_ARGS);
 Datum table_log_restore_table(PG_FUNCTION_ARGS);
 static char *do_quote_ident(char *iptr);
@@ -64,6 +73,88 @@ PG_FUNCTION_INFO_V1(table_log_show_column);
 /* restore a full table */
 PG_FUNCTION_INFO_V1(table_log_restore_table);
 
+/*
+ * Initialize table_log module and various internal
+ * settings like customer variables.
+ */
+void _PG_init(void)
+{
+	DefineCustomIntVariable("table_log.active_partition",
+							"Sets the current active partition identifier.",
+							NULL,
+							&tableLogActivePartitionId,
+							1,
+							1,
+							MAX_TABLE_LOG_PARTITIONS,
+							PGC_SUSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+}
+
+/*
+ * Returns a fully formatted log table relation name
+ * of the current active log table partition.
+ *
+ * The table_name argument is adjusted to match either a single
+ * table or a partitioned log table with _n appended, where n matches
+ * the current selected active partition id
+ * (see tableLogActivePartitionId).
+ */
+static inline char *getActiveLogTable(TriggerData *tg_data)
+{
+	bool       use_partitions = false;
+	StringInfo buf            = makeStringInfo();
+
+	/*
+	 * If we use several partitions for the log table, append
+	 * the partition id.
+	 */
+	if (tg_data->tg_trigger->tgnargs == 4)
+	{
+		/*
+		 * Examine trigger argument list. We expect the
+		 * partition mode to be the 4th argument to the table_log()
+		 * trigger. In case no argument was specified, we know that
+		 * we are operating on an old version, so assume
+		 * a non-partitioned installation automatically.
+		 */
+		if (strcmp(tg_data->tg_trigger->tgargs[3], "PARTITION") == 0)
+		{
+			/* Partition support enabled */
+			use_partitions = true;
+		}
+	}
+
+	if (tg_data->tg_trigger->tgnargs > 0)
+	{
+		appendStringInfoString(buf, tg_data->tg_trigger->tgargs[0]);
+	}
+	else
+	{
+		/*
+		 * We must deal with no arguments given to the trigger. In this
+		 * case the log table name is the same like the table we are
+		 * called on, plus the _log appended...
+		 */
+		appendStringInfo(buf, "%s_log", SPI_getrelname(tg_data->tg_relation));
+	}
+
+	if (use_partitions)
+	{
+		/*
+		 * Append the current active partition id, if partitioning
+		 * support is used. Note that we use offset 0 for nameing the
+		 * tables, so we need to adjust the specified partition id
+		 * accordingly.
+		 */
+		appendStringInfo(buf, "_%u", tableLogActivePartitionId - 1);
+	}
+
+	/* ...and we're done */
+	return buf->data;
+}
 
 /*
  * count_columns (TupleDesc tupleDesc)
@@ -154,12 +245,12 @@ Datum table_log(PG_FUNCTION_ARGS)
 
 	elog(DEBUG2, "number columns in orig table: %i", number_columns);
 
-	if (trigdata->tg_trigger->tgnargs > 3)
+	if (trigdata->tg_trigger->tgnargs > 4)
 	{
 		elog(ERROR, "table_log: too many arguments to trigger");
 	}
 
-  /* name of the log schema */
+	/* name of the log schema */
 	if (trigdata->tg_trigger->tgnargs > 2)
 	{
 		/* check if a log schema argument is given, if yes, use it */
@@ -186,25 +277,9 @@ Datum table_log(PG_FUNCTION_ARGS)
 	}
 
 	/* name of the log table */
-	if (trigdata->tg_trigger->tgnargs > 0)
-	{
-		/*
-		 * check if a logtable argument is given
-		 * if yes, use it
-		 */
-		log_table = pstrdup(trigdata->tg_trigger->tgargs[0]);
-		sprintf(log_table, "%s", trigdata->tg_trigger->tgargs[0]);
-	}
-	else
-	{
-		/* if no, use 'table name' + '_log' */
-		log_table = (char *) palloc((strlen(do_quote_ident(SPI_getrelname(trigdata->tg_relation))) + 5)
-									* sizeof(char));
-		sprintf(log_table, "%s_log", SPI_getrelname(trigdata->tg_relation));
-	}
+	log_table = getActiveLogTable(trigdata);
 
 	elog(DEBUG2, "log table: %s", log_table);
-	elog(DEBUG2, "now check, if log table exists");
 
 	/* get the number columns in the table */
 	query = makeStringInfo();
@@ -278,9 +353,6 @@ Datum table_log(PG_FUNCTION_ARGS)
 	}
 
 	elog(DEBUG2, "cleanup, trigger done");
-
-	/* clean up */
-	pfree(log_table);
 
 	/* close SPI connection */
 	SPI_finish();
@@ -498,6 +570,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	int  table_log_columns = 0;
 	/* the restore table name */
 	char  *table_restore;
+	char  *table_restore_schema;
 	/* the timestamp in past */
 	Datum      timestamp = PG_GETARG_DATUM(5);
 	/* the single pkey, can be null (then all keys will be restored) */
@@ -535,6 +608,9 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	StringInfo      col_query;
 
 	int      col_pkey = 0;
+
+	/* components of given restore table name */
+	List    *nameList;
 
 	/*
 	 * Some checks first...
@@ -651,7 +727,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	/* check original table */
 	query = makeStringInfo();
 	appendStringInfo(query,
-					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.relname = %s AND a.attnum > 0 AND a.attrelid = c.oid ORDER BY a.attnum",
+					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.oid = %s::regclass AND a.attnum > 0 AND a.attrelid = c.oid ORDER BY a.attnum",
 					 do_quote_literal(table_orig));
 
 	elog(DEBUG3, "query: %s", query->data);
@@ -673,7 +749,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	/* check pkey in original table */
 	resetStringInfo(query);
 	appendStringInfo(query,
-					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.relname=%s AND c.relkind='r' AND a.attname=%s AND a.attnum > 0 AND a.attrelid = c.oid",
+					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.oid=%s::regclass AND c.relkind='r' AND a.attname=%s AND a.attnum > 0 AND a.attrelid = c.oid",
 					 do_quote_literal(table_orig), do_quote_literal(table_orig_pkey));
 
 	elog(DEBUG3, "query: %s", query->data);
@@ -695,7 +771,13 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	/* check log table */
 	resetStringInfo(query);
 	appendStringInfo(query,
-					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.relname = %s AND a.attnum > 0 AND a.attrelid = c.oid ORDER BY a.attnum",
+					 "SELECT a.attname \
+                      FROM pg_class c, pg_attribute a \
+                      WHERE c.oid = %s::regclass \
+                            AND c.relkind IN ('v', 'r') \
+                            AND a.attnum > 0 \
+                            AND a.attrelid = c.oid \
+                            ORDER BY a.attnum",
 					 do_quote_literal(table_log));
 
 	elog(DEBUG3, "query: %s", query->data);
@@ -717,7 +799,12 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	/* check pkey in log table */
 	resetStringInfo(query);
 	appendStringInfo(query,
-					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.relname=%s AND c.relkind='r' AND a.attname=%s AND a.attnum > 0 AND a.attrelid = c.oid",
+					 "SELECT a.attname \
+                      FROM pg_class c, pg_attribute a \
+                      WHERE c.oid=%s::regclass AND c.relkind IN ('v', 'r') \
+                            AND a.attname=%s \
+                            AND a.attnum > 0 \
+                            AND a.attrelid = c.oid",
 					 do_quote_literal(table_log), do_quote_literal(table_log_pkey));
 
 	elog(DEBUG3, "query: %s", query->data);
@@ -736,11 +823,51 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	elog(DEBUG3, "log table: OK (%i columns)", table_log_columns);
 
-	/* check restore table */
+	/*
+	 * Check restore table.
+	 *
+	 * NOTE: We can't use a cast to regclass at this point,
+	 *       since we simply want to check wether
+	 *       the given restore table doesn't exist yet.
+	 *       Thus we need to parse the given table name into its
+	 *       components (we only support schema.tablename, so treat
+	 *       anything else as an error).
+	 *
+	 */
+	if (!SplitIdentifierString(table_restore, '.', &nameList))
+	{
+		elog(ERROR, "invalid syntax for restore table name: \"%s\"",
+			 table_restore);
+	}
+
 	resetStringInfo(query);
-	appendStringInfo(query,
-					 "SELECT pg_attribute.attname AS a FROM pg_class, pg_attribute WHERE pg_class.relname=%s AND pg_attribute.attnum > 0 AND pg_attribute.attrelid=pg_class.oid",
-					 do_quote_literal(table_restore));
+
+	if (list_length(nameList) > 1)
+	{
+		table_restore_schema = (char *)lfirst(list_head(nameList));
+		table_restore        = (char *)lfirst(list_tail(nameList));
+
+		appendStringInfo(query,
+						 "SELECT pg_attribute.attname AS a \
+                          FROM pg_class, pg_attribute, pg_namespace \
+                          WHERE pg_class.relname=%s					\
+                             AND pg_attribute.attnum > 0			   \
+                             AND pg_attribute.attrelid=pg_class.oid \
+                             AND pg_namespace.nspname = %s \
+					         AND pg_namespace.oid = pg_class.relnamespace",
+						 do_quote_literal(table_restore_schema), do_quote_literal(table_restore));
+
+	}
+	else
+	{
+		appendStringInfo(query,
+						 "SELECT pg_attribute.attname AS a \
+                          FROM pg_class, pg_attribute \
+                          WHERE pg_class.relname=%s					\
+                             AND pg_attribute.attnum > 0			   \
+                             AND pg_attribute.attrelid=pg_class.oid",
+						 do_quote_literal(table_restore));
+	}
 
 	elog(DEBUG3, "query: %s", query->data);
 
@@ -761,7 +888,9 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	/* now get all columns from original table */
 	resetStringInfo(query);
 	appendStringInfo(query,
-					 "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnum FROM pg_class c, pg_attribute a WHERE c.relname = %s AND a.attnum > 0 AND a.attrelid = c.oid ORDER BY a.attnum",
+					 "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnum \
+                      FROM pg_class c, pg_attribute a \
+                      WHERE c.oid = %s::regclass AND a.attnum > 0 AND a.attrelid = c.oid ORDER BY a.attnum",
 					 do_quote_literal(table_orig));
 
 	elog(DEBUG3, "query: %s", query->data);
