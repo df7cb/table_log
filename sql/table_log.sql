@@ -104,13 +104,13 @@ CREATE TABLE test(id integer, name text);
 ALTER TABLE test ADD PRIMARY KEY(id);
 SELECT table_log_init(5, 'public', 'test', 'public', 'test', 'PARTITION');
 
-SET table_log.active_partition = 1;
+SET table_log.active_partition = 0;
 
 INSERT INTO test VALUES(1, 'joe');
 INSERT INTO test VALUES(2, 'barney');
 INSERT INTO test VALUES(3, 'monica');
 
-SET table_log.active_partition = 2;
+SET table_log.active_partition = 1;
 
 UPDATE test SET name = 'veronica' WHERE id = 3;
 DELETE FROM test WHERE id = 1;

@@ -83,9 +83,9 @@ void _PG_init(void)
 							"Sets the current active partition identifier.",
 							NULL,
 							&tableLogActivePartitionId,
-							1,
-							1,
-							MAX_TABLE_LOG_PARTITIONS,
+							0,
+							0,
+							MAX_TABLE_LOG_PARTITIONS - 1,
 							PGC_SUSET,
 							0,
 							NULL,
@@ -149,7 +149,7 @@ static inline char *getActiveLogTable(TriggerData *tg_data)
 		 * tables, so we need to adjust the specified partition id
 		 * accordingly.
 		 */
-		appendStringInfo(buf, "_%u", tableLogActivePartitionId - 1);
+		appendStringInfo(buf, "_%u", tableLogActivePartitionId);
 	}
 
 	/* ...and we're done */
