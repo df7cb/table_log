@@ -738,14 +738,7 @@ static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
 	 * Take care for possible schema qualified relation names
 	 * in table_log and table_restore. table_orig is assumed to
 	 * be search_path aware!
-	 *
-	 * CAUTION: Since SplitIdentifierString() scribbles on the
-	 *          input string, we pass a copy. Otherwise a potentially
-	 *          unquoted single identifier is downcased and we don't
-	 *          know what has changed later.
 	 */
-	tmp_table_restore = pstrdup(table_restore);
-	tmp_table_log     = pstrdup(table_log);
 
 	if (!SplitIdentifierString(table_restore, '.', &restoreIdentList))
 	{
