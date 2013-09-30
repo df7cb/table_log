@@ -17,6 +17,7 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "executor/spi.h"	/* this is what you need to work with SPI */
+#include "catalog/namespace.h"
 #include "commands/trigger.h"	/* -"- and triggers */
 #include "mb/pg_wchar.h"	/* support for the quoting functions */
 #include "miscadmin.h"
@@ -27,6 +28,7 @@
 #include <utils/lsyscache.h>
 #include <utils/rel.h>
 #include <utils/timestamp.h>
+#include <utils/syscache.h>
 #include "funcapi.h"
 
 /* for PostgreSQL >= 8.2.x */
@@ -44,11 +46,97 @@ PG_MODULE_MAGIC;
 #endif
 
 /*
- * Current active log table partition. Default is always one,
- * so that in case no partitioning is used always a single table
- * is our log target.
+ * Current active log table partition. Default is always zero.
  */
-TableLogPartitionId tableLogActivePartitionId = 1;
+TableLogPartitionId tableLogActivePartitionId = 0;
+
+/*
+ * table_log restore descriptor.
+ *
+ * Carries all information to restore data from a table_log table
+ */
+typedef struct
+{
+	char *schema;
+	char *relname;
+} TableLogRelIdent;
+
+typedef struct
+{
+	/* Non-qualified relation name
+	 * of original table.
+	 */
+	char *orig_relname;
+
+	/*
+	 * OID of original table, saved
+	 * for cache lookup.
+	 */
+	Oid orig_relid;
+
+	/*
+	 * List of attnums of original table part
+	 * of the primary key or unique constraint. Only
+	 * used in case of no explicit specified pk column.
+	 * (see relationGetPrimaryKeyColumns() for details).
+	 */
+	AttrNumber *orig_pk_attnum;
+
+	/*
+	 * Number of pk attributes in original tables.
+	 */
+	int orig_num_pk_attnums;
+
+	/*
+	 * List of attribute names. The list index matches
+	 * the attribute number stored in the orig_pk_attnum
+	 * array.
+	 */
+	List *orig_pk_attr_names;
+
+	/*
+	 * OID of log table.
+	 */
+	Oid log_relid;
+
+	/*
+	 * Possible schema qualified relation name
+	 * of log table.
+	 */
+	bool use_schema_log;
+	union
+	{
+		TableLogRelIdent ident_log;
+		char *relname_log;
+	};
+
+	/*
+	 * Primary key column name of the log table.
+	 */
+	char *pkey_log;
+
+	/*
+	 * OID of restore table.
+	 */
+	Oid restore_relid;
+
+	/*
+	 * Possible schema qualified relation name
+	 * of restore table.
+	 */
+	bool use_schema_restore;
+	union
+	{
+		TableLogRelIdent ident_restore;
+		char *relname_restore;
+	};
+} TableLogRestoreDescr;
+
+#define RESTORE_TABLE_IDENT(a, type) \
+	((a.use_schema_##type )								 \
+	 ? quote_qualified_identifier(a.ident_##type.schema, \
+								  a.ident_##type.relname)\
+	 : quote_identifier(a.relname_##type))
 
 void _PG_init(void);
 extern Datum table_log(PG_FUNCTION_ARGS);
@@ -56,11 +144,38 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS);
 static char *do_quote_ident(char *iptr);
 static char *do_quote_literal(char *iptr);
 static void __table_log (TriggerData *trigdata, char *changed_mode, char *changed_tuple, HeapTuple tuple, int number_columns, char *log_table, int use_session_user, char *log_schema);
-void __table_log_restore_table_insert(SPITupleTable *spi_tuptable, char *table_restore, char *table_orig_pkey, char *col_query_start, int col_pkey, int number_columns, int i);
-void __table_log_restore_table_update(SPITupleTable *spi_tuptable, char *table_restore, char *table_orig_pkey, char *col_query_start, int col_pkey, int number_columns, int i, char *old_key_string);
-void __table_log_restore_table_delete(SPITupleTable *spi_tuptable, char *table_restore, char *table_orig_pkey, char *col_query_start, int col_pkey, int number_columns, int i);
-char *__table_log_varcharout(VarChar *s);
-int count_columns (TupleDesc tupleDesc);
+static void __table_log_restore_table_insert(SPITupleTable *spi_tuptable,
+											 char *table_restore,
+											 char *table_orig_pkey,
+											 char *col_query_start,
+											 int col_pkey,
+											 int number_columns,
+											 int i);
+static void __table_log_restore_table_update(SPITupleTable *spi_tuptable,
+											 char *table_restore,
+											 char *table_orig_pkey,
+											 char *col_query_start,
+											 int col_pkey,
+											 int number_columns,
+											 int i,
+											 char *old_key_string);
+static void __table_log_restore_table_delete(SPITupleTable *spi_tuptable,
+											 char *table_restore,
+											 char *table_orig_pkey,
+											 char *col_query_start,
+											 int col_pkey,
+											 int number_columns,
+											 int i);
+static char *__table_log_varcharout(VarChar *s);
+static int count_columns (TupleDesc tupleDesc);
+static void mapPrimaryKeyColumnNames(TableLogRestoreDescr *restore_descr);
+static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
+									char *table_orig,
+									char *table_orig_pkey,
+									char *table_log,
+									char *table_log_pkey,
+									char *table_restore);
+static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr);
 
 /* this is a V1 (new) function */
 /* the trigger function */
@@ -161,7 +276,7 @@ static inline char *getActiveLogTable(TriggerData *tg_data)
  * Will count and return the number of columns in the table described by
  * tupleDesc. It needs to ignore dropped columns.
  */
-int count_columns (TupleDesc tupleDesc)
+static int count_columns (TupleDesc tupleDesc)
 {
 	int count = 0;
 	int i;
@@ -529,13 +644,330 @@ Datum table_log_show_column(PG_FUNCTION_ARGS)
 }
 #endif /* FUNCAPI_H */
 
+/*
+ * Retrieves the columns of the primary key the original
+ * table has and stores their attribute numbers in the
+ * specified TableLogRestoreDescr descriptor. The caller is responsible
+ * to pass a valid descriptor initialized by initTableLogRestoreDescr().
+ */
+static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr)
+{
+	Relation  origRel;
+	List     *indexOidList;
+	ListCell *indexOidScan;
+
+	Assert((restore_descr != NULL)
+		   && (restore_descr->orig_relname != NULL));
+
+	restore_descr->orig_pk_attnum = NULL;
+
+	/*
+	 * Get all indexes for the relation, take care to
+	 * request a share lock before.
+	 */
+	origRel = heap_open(restore_descr->orig_relid, AccessShareLock);
+
+	indexOidList = RelationGetIndexList(origRel);
+
+	foreach(indexOidScan, indexOidList)
+	{
+		Oid indexOid = lfirst_oid(indexOidScan);
+		Form_pg_index indexStruct;
+		HeapTuple     indexTuple;
+		int           i;
+
+		/*
+		 * Lookup the key via syscache, extract the key columns
+		 * from this index in case we have found a primary key.
+		 */
+		indexTuple = SearchSysCache1(INDEXRELID,
+									 ObjectIdGetDatum(indexOid));
+		if (!HeapTupleIsValid(indexTuple))
+			elog(ERROR, "cache lookup failed for index %u", indexOid);
+		indexStruct = (Form_pg_index) GETSTRUCT(indexTuple);
+
+		/*
+		 * Next one if this is not a primary key or
+		 * unique constraint.
+		 */
+		if (!indexStruct->indisprimary)
+			continue;
+
+		/*
+		 * Okay, looks like this is a PK let's
+		 * get the attnums from it and store them
+		 * in the TableLogRestoreDescr descriptor.
+		 */
+		restore_descr->orig_num_pk_attnums = indexStruct->indnatts;
+		restore_descr->orig_pk_attnum = (AttrNumber *) palloc(indexStruct->indnatts
+															  * sizeof(AttrNumber));
+		for (i = 0; i < indexStruct->indnatts; i++)
+		{
+			restore_descr->orig_pk_attnum[i] = indexStruct->indkey.values[i];
+		}
+	}
+
+	/*
+	 * Okay, we're done. Cleanup and exit.
+	 */
+	heap_close(origRel, AccessShareLock);
+}
+
+static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
+									char *table_orig,
+									char *table_orig_pkey,
+									char *table_log,
+									char *table_log_pkey,
+									char *table_restore)
+{
+	List *logIdentList;
+	List *restoreIdentList;
+	int   i;
+
+	Assert(restore_descr != NULL);
+
+	/*
+	 * Setup some stuff...
+	 */
+	restore_descr->orig_num_pk_attnums = 0;
+	restore_descr->orig_pk_attr_names  = NIL;
+	restore_descr->orig_pk_attnum      = NULL;
+	restore_descr->orig_relname        = pstrdup(table_orig);
+
+	/*
+	 * Take care for possible schema qualified relation names
+	 * in table_log and table_restore. table_orig is assumed to
+	 * be search_path aware!
+	 *
+	 * CAUTION: Since SplitIdentifierString() scribbles on the
+	 *          input string, we pass a copy. Otherwise a potentially
+	 *          unquoted single identifier is downcased and we don't
+	 *          know what has changed later.
+	 */
+	tmp_table_restore = pstrdup(table_restore);
+	tmp_table_log     = pstrdup(table_log);
+
+	if (!SplitIdentifierString(table_restore, '.', &restoreIdentList))
+	{
+		elog(ERROR, "invalid syntax for restore table name: \"%s\"",
+			 table_restore);
+	}
+
+	if (!SplitIdentifierString(table_log, '.', &logIdentList))
+	{
+		elog(ERROR, "invalid syntax for log table name: \"%s\"",
+			 table_restore);
+	}
+
+	/*
+	 * Since the original table name is assumed
+	 * not to be qualified, simply look it up by RelationGetRelid()
+	 */
+	restore_descr->orig_relid = RelnameGetRelid(restore_descr->orig_relname);
+
+	if (restore_descr->orig_relid == InvalidOid)
+	{
+		elog(ERROR, "lookup for relation \"%s\" failed",
+			 restore_descr->orig_relname);
+	}
+
+	/*
+	 * Assign relation identifier to restore descriptor.
+	 */
+	if (list_length(logIdentList) > 1)
+	{
+		restore_descr->ident_log.schema  = (char *)lfirst(list_head(logIdentList));
+		restore_descr->ident_log.relname = (char *)lfirst(list_tail(logIdentList));
+		restore_descr->use_schema_log    = true;
+	}
+	else
+	{
+		restore_descr->relname_log    = table_log;
+		restore_descr->use_schema_log = false;
+	}
+
+	if (list_length(restoreIdentList) > 1)
+	{
+		restore_descr->ident_restore.schema = (char *)lfirst(list_head(restoreIdentList));
+		restore_descr->ident_restore.relname = (char *)lfirst(list_tail(restoreIdentList));
+		restore_descr->use_schema_restore = true;
+	}
+	else
+	{
+		restore_descr->relname_restore = table_restore;
+		restore_descr->use_schema_restore = false;
+	}
+
+	/*
+	 * Lookup OID of log table. LookupExplicitNamespace()
+	 * takes care wether we have at least USAGE on the specified
+	 * namespace. We don't need to do that in case we have a
+	 * non-qualified relation.
+	 */
+	if (restore_descr->use_schema_log)
+	{
+		Oid nspOid;
+
+		nspOid = LookupExplicitNamespace(restore_descr->ident_log.schema);
+		restore_descr->log_relid = get_relname_relid(restore_descr->ident_log.relname,
+													 nspOid);
+	}
+	else
+	{
+		restore_descr->log_relid = RelnameGetRelid(restore_descr->relname_log);
+	}
+
+	/*
+	 * ... the same for the restore table
+	 */
+	if (restore_descr->use_schema_restore)
+	{
+		Oid nspOid;
+
+		nspOid = LookupExplicitNamespace(restore_descr->ident_restore.schema);
+		restore_descr->restore_relid = get_relname_relid(restore_descr->ident_restore.relname,
+														 nspOid);
+	}
+	else
+	{
+		restore_descr->restore_relid = RelnameGetRelid(restore_descr->relname_restore);
+	}
+
+	/*
+	 * Primary key of original table, but only in case the
+	 * caller didn't specify an explicit column.
+	 *
+	 * NOTE: This code is also responsible to support table_log_restore_table()
+	 *       when having a composite primary key on a table. The old
+	 *       API only allows for a single column to be specified, so to get
+	 *       the new functionality the caller simply passes  NULL to
+	 *       the table_orig_pkey value and let this code do all the
+	 *       necessary legwork.
+	 */
+	if (table_orig_pkey == NULL)
+	{
+		getRelationPrimaryKeyColumns(restore_descr);
+	}
+	else
+	{
+		/*
+		 * This is a single pkey column.
+		 */
+		restore_descr->orig_num_pk_attnums = 1;
+		restore_descr->orig_pk_attnum      = (AttrNumber *) palloc(sizeof(AttrNumber));
+		restore_descr->orig_pk_attnum[0]   = get_attnum(restore_descr->orig_relid,
+														table_orig_pkey);
+	}
+
+	/*
+	 * If there is no PK column, error out...
+	 */
+	if (restore_descr->orig_num_pk_attnums <= 0)
+		elog(ERROR, "no primary key on table \"%s\" found",
+			 restore_descr->orig_relname);
+
+	/*
+	 * Save the pk column name of the log table.
+	 */
+	restore_descr->pkey_log = pstrdup(table_log_pkey);
+
+	/*
+	 * Map the attribute number for the pk to its
+	 * column names.
+	 */
+	mapPrimaryKeyColumnNames(restore_descr);
+
+	/*
+	 * The restore table only allows for a single primary key column.
+	 * Check that this column isn't part of the original table's
+	 * pkey.
+	 */
+	for (i = 0; i < restore_descr->orig_num_pk_attnums; i++)
+	{
+		if (strncmp(list_nth(restore_descr->orig_pk_attr_names, i),
+					restore_descr->pkey_log,
+					NAMEDATALEN) == 0)
+		{
+			elog(ERROR, "primary key of log table is part of original table");
+		}
+	}
+}
+/*
+ * Takes a valid fully initialized TableLogRestoreDescr
+ * and maps all attribute numbers from the original
+ * table primary key to their column names.
+ *
+ * The caller must have called setTableLogRestoreDescr()
+ * before.
+ */
+static void mapPrimaryKeyColumnNames(TableLogRestoreDescr *restore_descr)
+{
+	int i;
+
+	/*
+	 * Make sure we deal with an empty list.
+	 */
+	restore_descr->orig_pk_attr_names = NIL;
+
+	for (i = 0; i < restore_descr->orig_num_pk_attnums; i++)
+	{
+		/*
+		 * Lookup the pk attribute name.
+		 */
+		char *pk_attr_name = pstrdup(get_relid_attribute_name(restore_descr->orig_relid,
+															  restore_descr->orig_pk_attnum[i]));
+
+		restore_descr->orig_pk_attr_names = lappend(restore_descr->orig_pk_attr_names,
+													pk_attr_name);
+	}
+}
+
+static inline char *
+StringListToString(List *list, int length, StringInfo buf)
+{
+	ListCell *scan;
+	int i;
+
+	Assert(list != NIL);
+	resetStringInfo(buf);
+
+	foreach(scan, list)
+	{
+		char *str = (char *)lfirst(scan);
+		appendStringInfoString(buf, str);
+
+		if (i < (length - 1))
+			appendStringInfoString(buf, ", ");
+	}
+
+	return buf->data;
+}
+
+static inline char *
+AttrNumberArrayToString(int *attrnums, int length, StringInfo buf)
+{
+	int i;
+
+	Assert(attrnums != NULL);
+	resetStringInfo(buf);
+
+	for(i = 0; i < length; i++)
+	{
+		appendStringInfo(buf, "%d", attrnums[i]);
+
+		if (i < (length - 1))
+			appendStringInfoString(buf, ", ");
+	}
+
+	return buf->data;
+}
 
 /*
-table_log_restore_table()
+  table_log_restore_table()
 
-restore a complete table based on the logging table
+  restore a complete table based on the logging table
 
-parameter:
+  parameter:
   - original table name
   - name of primary key in original table
   - logging table
@@ -555,26 +987,20 @@ parameter:
 */
 Datum table_log_restore_table(PG_FUNCTION_ARGS)
 {
-	/* the original table name */
-	char  *table_orig;
+	TableLogRestoreDescr restore_descr;
+
 	/* the primary key in the original table */
 	char  *table_orig_pkey;
-	/* number columns in original table */
-	int  table_orig_columns = 0;
-	/* the log table name */
-	char  *table_log;
-	/* the primary key in the log table (usually trigger_id) */
-	/* cannot be the same then then the pkey in the original table */
-	char  *table_log_pkey;
+
 	/* number columns in log table */
 	int  table_log_columns = 0;
-	/* the restore table name */
-	char  *table_restore;
-	char  *table_restore_schema;
+
 	/* the timestamp in past */
 	Datum      timestamp = PG_GETARG_DATUM(5);
+
 	/* the single pkey, can be null (then all keys will be restored) */
 	char  *search_pkey = "";
+
 	/* the restore method
 	   - 0: restore from blank table (default)
 	   needs a complete log table!
@@ -609,9 +1035,6 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	int      col_pkey = 0;
 
-	/* components of given restore table name */
-	List    *nameList;
-
 	/*
 	 * Some checks first...
 	 */
@@ -624,7 +1047,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	}
 	if (PG_ARGISNULL(1))
 	{
-		elog(ERROR, "table_log_restore_table: missing primary key name for original table");
+		table_orig_pkey = NULL;
 	}
 	if (PG_ARGISNULL(2))
 	{
@@ -702,19 +1125,26 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 		}
  	} /* nargs >= 9 */
 
-	/* get parameter */
-	table_orig = __table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(0));
-	table_orig_pkey = __table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(1));
-	table_log = __table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(2));
-	table_log_pkey = __table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(3));
-	table_restore = __table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(4));
+	/* get parameter and set them to the restore descriptor */
 
-	/* pkey of original table cannot be the same as of log table */
-	if (strcmp((const char *)table_orig_pkey, (const char *)table_log_pkey) == 0)
-	{
-		elog(ERROR, "pkey of logging table cannot be the pkey of the original table: %s <-> %s",
-			 table_orig_pkey, table_log_pkey);
-	}
+	setTableLogRestoreDescr(&restore_descr,
+							__table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(0)),
+							((table_orig_pkey != NULL) ? __table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(1)) : NULL),
+							__table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(2)),
+							__table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(3)),
+							__table_log_varcharout((VarChar *)PG_GETARG_VARCHAR_P(4)));
+
+	/*
+	 * Composite PK not supported atm...
+	 *
+	 * CAUTION:
+	 *
+	 * The infrastructure to support composite primary keys is there,
+	 * but the following old cold still assumes there's only one column
+	 * in the PK to consider.
+	 */
+	if (restore_descr.orig_num_pk_attnums > 1)
+		elog(ERROR, "composite primary key not supported");
 
 	/* Connect to SPI manager */
 	ret = SPI_connect();
@@ -728,7 +1158,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	query = makeStringInfo();
 	appendStringInfo(query,
 					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.oid = %s::regclass AND a.attnum > 0 AND a.attrelid = c.oid ORDER BY a.attnum",
-					 do_quote_literal(table_orig));
+					 do_quote_literal(do_quote_ident(restore_descr.orig_relname)));
 
 	elog(DEBUG3, "query: %s", query->data);
 
@@ -736,49 +1166,33 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	if (ret != SPI_OK_SELECT)
 	{
-		elog(ERROR, "could not check relation: %s", table_orig);
+		elog(ERROR, "could not check relation: \"%s\"",
+			 restore_descr.orig_relname);
 	}
 
-	if (SPI_processed > 0)
+	if (SPI_processed <= 0)
 	{
-		table_orig_columns = SPI_processed;
-	} else {
-		elog(ERROR, "could not check relation: %s", table_orig);
+		elog(ERROR, "could not check relation: \"%s\"",
+			 restore_descr.orig_relname);
 	}
-
-	/* check pkey in original table */
-	resetStringInfo(query);
-	appendStringInfo(query,
-					 "SELECT a.attname FROM pg_class c, pg_attribute a WHERE c.oid=%s::regclass AND c.relkind='r' AND a.attname=%s AND a.attnum > 0 AND a.attrelid = c.oid",
-					 do_quote_literal(table_orig), do_quote_literal(table_orig_pkey));
-
-	elog(DEBUG3, "query: %s", query->data);
-
-	ret = SPI_exec(query->data, 0);
-
-	if (ret != SPI_OK_SELECT)
-	{
-		elog(ERROR, "could not check relation: %s", table_orig);
-	}
-
-	if (SPI_processed == 0)
-	{
-		elog(ERROR, "could not check relation: %s", table_orig);
-	}
-
-	elog(DEBUG2, "original table: OK (%i columns)", table_orig_columns);
 
 	/* check log table */
+	if (restore_descr.log_relid == InvalidOid)
+	{
+		elog(ERROR, "log table \"%s\" does not exist",
+			 RESTORE_TABLE_IDENT(restore_descr, log));
+	}
+
 	resetStringInfo(query);
 	appendStringInfo(query,
 					 "SELECT a.attname \
                       FROM pg_class c, pg_attribute a \
-                      WHERE c.oid = %s::regclass \
+                      WHERE c.oid = %u \
                             AND c.relkind IN ('v', 'r') \
                             AND a.attnum > 0 \
-                            AND a.attrelid = c.oid \
+                            AND a.attrelid = c.oid	\
                             ORDER BY a.attnum",
-					 do_quote_literal(table_log));
+					 restore_descr.log_relid);
 
 	elog(DEBUG3, "query: %s", query->data);
 
@@ -786,26 +1200,29 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	if (ret != SPI_OK_SELECT)
 	{
-		elog(ERROR, "could not check relation [1]: %s", table_log);
+		elog(ERROR, "could not check relation [1]: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, log));
 	}
 
-	if (SPI_processed > 0)
+	if (SPI_processed <= 0)
 	{
-		table_log_columns = SPI_processed;
-	} else {
-		elog(ERROR, "could not check relation [2]: %s", table_log);
+		elog(ERROR, "could not check relation [2]: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, log));
 	}
+
+	table_log_columns = SPI_processed;
 
 	/* check pkey in log table */
 	resetStringInfo(query);
 	appendStringInfo(query,
 					 "SELECT a.attname \
                       FROM pg_class c, pg_attribute a \
-                      WHERE c.oid=%s::regclass AND c.relkind IN ('v', 'r') \
+                      WHERE c.oid=%u AND c.relkind IN ('v', 'r') \
                             AND a.attname=%s \
                             AND a.attnum > 0 \
                             AND a.attrelid = c.oid",
-					 do_quote_literal(table_log), do_quote_literal(table_log_pkey));
+					 restore_descr.log_relid,
+					 do_quote_literal(restore_descr.pkey_log));
 
 	elog(DEBUG3, "query: %s", query->data);
 
@@ -813,40 +1230,21 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	if (ret != SPI_OK_SELECT)
 	{
-		elog(ERROR, "could not check relation [3]: %s", table_log);
+		elog(ERROR, "could not check relation [3]: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, log));
 	}
 
 	if (SPI_processed == 0)
 	{
-		elog(ERROR, "could not check relation [4]: %s", table_log);
+		elog(ERROR, "could not check relation [4]: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, log));
 	}
 
 	elog(DEBUG3, "log table: OK (%i columns)", table_log_columns);
 
-	/*
-	 * Check restore table.
-	 *
-	 * NOTE: We can't use a cast to regclass at this point,
-	 *       since we simply want to check wether
-	 *       the given restore table doesn't exist yet.
-	 *       Thus we need to parse the given table name into its
-	 *       components (we only support schema.tablename, so treat
-	 *       anything else as an error).
-	 *
-	 */
-	if (!SplitIdentifierString(table_restore, '.', &nameList))
-	{
-		elog(ERROR, "invalid syntax for restore table name: \"%s\"",
-			 table_restore);
-	}
-
 	resetStringInfo(query);
-
-	if (list_length(nameList) > 1)
+	if (restore_descr.use_schema_restore)
 	{
-		table_restore_schema = (char *)lfirst(list_head(nameList));
-		table_restore        = (char *)lfirst(list_tail(nameList));
-
 		appendStringInfo(query,
 						 "SELECT pg_attribute.attname AS a \
                           FROM pg_class, pg_attribute, pg_namespace \
@@ -855,7 +1253,8 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
                              AND pg_attribute.attrelid=pg_class.oid \
                              AND pg_namespace.nspname = %s \
 					         AND pg_namespace.oid = pg_class.relnamespace",
-						 do_quote_literal(table_restore_schema), do_quote_literal(table_restore));
+						 do_quote_literal(restore_descr.ident_restore.schema),
+						 do_quote_literal(restore_descr.ident_restore.relname));
 
 	}
 	else
@@ -866,7 +1265,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
                           WHERE pg_class.relname=%s					\
                              AND pg_attribute.attnum > 0			   \
                              AND pg_attribute.attrelid=pg_class.oid",
-						 do_quote_literal(table_restore));
+						 do_quote_literal(restore_descr.relname_restore));
 	}
 
 	elog(DEBUG3, "query: %s", query->data);
@@ -875,15 +1274,17 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	if (ret != SPI_OK_SELECT)
 	{
-		elog(ERROR, "could not check relation: %s", table_restore);
+		elog(ERROR, "could not check relation: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, restore));
 	}
 
 	if (SPI_processed > 0)
 	{
-		elog(ERROR, "restore table already exists: %s", table_restore);
+		elog(ERROR, "restore table already exists: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, restore));
 	}
 
-	elog(DEBUG2, "restore table: OK (doesnt exists)");
+	elog(DEBUG2, "restore table: OK (doesn't exists)");
 
 	/* now get all columns from original table */
 	resetStringInfo(query);
@@ -891,7 +1292,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 					 "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnum \
                       FROM pg_class c, pg_attribute a \
                       WHERE c.oid = %s::regclass AND a.attnum > 0 AND a.attrelid = c.oid ORDER BY a.attnum",
-					 do_quote_literal(table_orig));
+					 do_quote_literal(do_quote_ident(restore_descr.orig_relname)));
 
 	elog(DEBUG3, "query: %s", query->data);
 
@@ -899,12 +1300,14 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	if (ret != SPI_OK_SELECT)
 	{
-		elog(ERROR, "could not get columns from relation: %s", table_orig);
+		elog(ERROR, "could not get columns from relation: \"%s\"",
+			 restore_descr.orig_relname);
 	}
 
 	if (SPI_processed == 0)
 	{
-		elog(ERROR, "could not check relation: %s", table_orig);
+		elog(ERROR, "could not check relation: \"%s\"",
+			 restore_descr.orig_relname);
 	}
 
 	results = SPI_processed;
@@ -920,7 +1323,8 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 		tmp = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
 
 		/* now check, if this is the pkey */
-		if (strcmp((const char *)tmp, (const char *)table_orig_pkey) == 0)
+		if (strcmp((const char *)tmp,
+				   (const char *)list_nth(restore_descr.orig_pk_attr_names, 0)) == 0)
 		{
 			/* remember the (real) number */
 			col_pkey = i + 1;
@@ -930,7 +1334,9 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	/* check if we have found the pkey */
 	if (col_pkey == 0)
 	{
-		elog(ERROR, "cannot find pkey (%s) in table %s", table_orig_pkey, table_orig);
+		elog(ERROR, "cannot find pkey (%s) in table \"%s\"",
+			 (char *)list_nth(restore_descr.orig_pk_attr_names, 0),
+			 restore_descr.orig_relname);
 	}
 
 	/* allocate memory for string */
@@ -948,7 +1354,8 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	/* create restore table */
 	elog(DEBUG2, "string for columns: %s", col_query->data);
-	elog(DEBUG2, "create restore table: %s", table_restore);
+	elog(DEBUG2, "create restore table: %s",
+		 RESTORE_TABLE_IDENT(restore_descr, restore));
 	resetStringInfo(query);
 	appendStringInfo(query, "SELECT * INTO ");
 
@@ -959,13 +1366,15 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	}
 
 	/* from which table? */
-	appendStringInfo(query, "TABLE %s FROM %s ", table_restore, table_orig);
+	appendStringInfo(query, "TABLE %s FROM %s ",
+					 RESTORE_TABLE_IDENT(restore_descr, restore),
+					 quote_identifier(restore_descr.orig_relname));
 
 	if (need_search_pkey == 1)
 	{
 		/* only extract a specific key */
 		appendStringInfo(query, "WHERE %s = %s ",
-						 do_quote_ident(table_orig_pkey),
+						 do_quote_ident(list_nth(restore_descr.orig_pk_attr_names, 0)),
 						 do_quote_literal(search_pkey));
 	}
 
@@ -981,7 +1390,8 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	if (ret != SPI_OK_SELINTO)
 	{
-		elog(ERROR, "could not check relation: %s", table_restore);
+		elog(ERROR, "could not check relation: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, restore));
 	}
 
 	if (method == 1)
@@ -1000,9 +1410,14 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	/* allocate memory for string and build query */
 	d_query = makeStringInfo();
+
+	elog(DEBUG2, "using log table %s",
+		 RESTORE_TABLE_IDENT(restore_descr, log));
+
 	appendStringInfo(d_query,
 					 "SELECT %s, trigger_mode, trigger_tuple, trigger_changed FROM %s WHERE ",
-					 col_query->data, do_quote_ident(table_log));
+					 col_query->data,
+					 RESTORE_TABLE_IDENT(restore_descr, log));
 
 	if (method == 0)
 	{
@@ -1020,19 +1435,19 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	if (need_search_pkey == 1)
 	{
 		appendStringInfo(d_query, "AND %s = %s ",
-						 do_quote_ident(table_orig_pkey),
+						 do_quote_ident(list_nth(restore_descr.orig_pk_attr_names, 0)),
 						 do_quote_literal(search_pkey));
 	}
 
 	if (method == 0)
 	{
 		appendStringInfo(d_query, "ORDER BY %s ASC",
-						 do_quote_ident(table_log_pkey));
+						 do_quote_ident(restore_descr.pkey_log));
 	}
 	else
 	{
 		appendStringInfo(d_query, "ORDER BY %s DESC",
-						 do_quote_ident(table_log_pkey));
+						 do_quote_ident(restore_descr.pkey_log));
 	}
 
 	elog(DEBUG3, "query: %s", d_query->data);
@@ -1041,7 +1456,8 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 	if (ret != SPI_OK_SELECT)
 	{
-		elog(ERROR, "could not get log data from table: %s", table_log);
+		elog(ERROR, "could not get log data from table: %s",
+			 RESTORE_TABLE_IDENT(restore_descr, log));
 	}
 
 	elog(DEBUG2, "number log entries to restore: %i", SPI_processed);
@@ -1090,15 +1506,34 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 			if (strcmp((const char *)trigger_mode, (const char *)"INSERT") == 0)
 			{
-				__table_log_restore_table_insert(spi_tuptable, table_restore, table_orig_pkey, col_query->data, col_pkey, number_columns, i);
+				__table_log_restore_table_insert(spi_tuptable,
+												 (char *)RESTORE_TABLE_IDENT(restore_descr, restore),
+												 list_nth(restore_descr.orig_pk_attr_names, 0),
+												 col_query->data,
+												 col_pkey,
+												 number_columns,
+												 i);
 			}
 			else if (strcmp((const char *)trigger_mode, (const char *)"UPDATE") == 0)
 			{
-				__table_log_restore_table_update(spi_tuptable, table_restore, table_orig_pkey, col_query->data, col_pkey, number_columns, i, old_pkey_string);
+				__table_log_restore_table_update(spi_tuptable,
+												 (char *)RESTORE_TABLE_IDENT(restore_descr, restore),
+												 list_nth(restore_descr.orig_pk_attr_names, 0),
+												 col_query->data,
+												 col_pkey,
+												 number_columns,
+												 i,
+												 old_pkey_string);
 			}
 			else if (strcmp((const char *)trigger_mode, (const char *)"DELETE") == 0)
 			{
-				__table_log_restore_table_delete(spi_tuptable, table_restore, table_orig_pkey, col_query->data, col_pkey, number_columns, i);
+				__table_log_restore_table_delete(spi_tuptable,
+												 (char *)RESTORE_TABLE_IDENT(restore_descr, restore),
+												 list_nth(restore_descr.orig_pk_attr_names, 0),
+												 col_query->data,
+												 col_pkey,
+												 number_columns,
+												 i);
 			}
 			else
 			{
@@ -1132,15 +1567,34 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 
 			if (strcmp((const char *)trigger_mode, (const char *)"INSERT") == 0)
 			{
-				__table_log_restore_table_delete(spi_tuptable, table_restore, table_orig_pkey, col_query->data, col_pkey, number_columns, i);
+				__table_log_restore_table_delete(spi_tuptable,
+												 (char *)RESTORE_TABLE_IDENT(restore_descr, restore),
+												 list_nth(restore_descr.orig_pk_attr_names, 0),
+												 col_query->data,
+												 col_pkey,
+												 number_columns,
+												 i);
 			}
 			else if (strcmp((const char *)trigger_mode, (const char *)"UPDATE") == 0)
 			{
-				__table_log_restore_table_update(spi_tuptable, table_restore, table_orig_pkey, col_query->data, col_pkey, number_columns, i, old_pkey_string);
+				__table_log_restore_table_update(spi_tuptable,
+												 (char *)RESTORE_TABLE_IDENT(restore_descr, restore),
+												 list_nth(restore_descr.orig_pk_attr_names, 0),
+												 col_query->data,
+												 col_pkey,
+												 number_columns,
+												 i,
+												 old_pkey_string);
 			}
 			else if (strcmp((const char *)trigger_mode, (const char *)"DELETE") == 0)
 			{
-				__table_log_restore_table_insert(spi_tuptable, table_restore, table_orig_pkey, col_query->data, col_pkey, number_columns, i);
+				__table_log_restore_table_insert(spi_tuptable,
+												 (char *)RESTORE_TABLE_IDENT(restore_descr, restore),
+												 list_nth(restore_descr.orig_pk_attr_names, 0),
+												 col_query->data,
+												 col_pkey,
+												 number_columns,
+												 i);
 			}
 		}
 	}
@@ -1148,18 +1602,28 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	/* close SPI connection */
 	SPI_finish();
 
-	elog(DEBUG2, "table_log_restore_table() done, results in: %s", table_restore);
+	elog(DEBUG2, "table_log_restore_table() done, results in: %s",
+		 RESTORE_TABLE_IDENT(restore_descr, restore));
 
 	/* convert string to VarChar for result */
-	return_name = DatumGetVarCharP(DirectFunctionCall2(varcharin, CStringGetDatum(table_restore), Int32GetDatum(strlen(table_restore) + VARHDRSZ)));
+	return_name = DatumGetVarCharP(DirectFunctionCall2(varcharin,
+													   CStringGetDatum(RESTORE_TABLE_IDENT(restore_descr,
+																						   restore)),
+													   Int32GetDatum(strlen(RESTORE_TABLE_IDENT(restore_descr,
+																								restore))
+																	 + VARHDRSZ)));
 
 	/* and return the name of the restore table */
 	PG_RETURN_VARCHAR_P(return_name);
 }
 
-void __table_log_restore_table_insert(SPITupleTable *spi_tuptable, char *table_restore,
-									  char *table_orig_pkey, char *col_query_start,
-									  int col_pkey, int number_columns, int i) {
+static void __table_log_restore_table_insert(SPITupleTable *spi_tuptable,
+											 char *table_restore,
+											 char *table_orig_pkey,
+											 char *col_query_start,
+											 int col_pkey,
+											 int number_columns,
+											 int i) {
 	int            j;
 	int            ret;
 	char          *tmp;
@@ -1171,7 +1635,7 @@ void __table_log_restore_table_insert(SPITupleTable *spi_tuptable, char *table_r
 
 	/* build query */
 	appendStringInfo(d_query, "INSERT INTO %s (%s) VALUES (",
-					 do_quote_ident(table_restore),
+					 table_restore,
 					 col_query_start);
 
 	for (j = 1; j <= number_columns; j++)
@@ -1205,10 +1669,14 @@ void __table_log_restore_table_insert(SPITupleTable *spi_tuptable, char *table_r
 	/* done */
 }
 
-void __table_log_restore_table_update(SPITupleTable *spi_tuptable, char *table_restore,
-									  char *table_orig_pkey, char *col_query_start,
-									  int col_pkey, int number_columns,
-									  int i, char *old_pkey_string) {
+static void __table_log_restore_table_update(SPITupleTable *spi_tuptable,
+											 char *table_restore,
+											 char *table_orig_pkey,
+											 char *col_query_start,
+											 int col_pkey,
+											 int number_columns,
+											 int i,
+											 char *old_pkey_string) {
 	int   j;
 	int   ret;
 	char *tmp;
@@ -1221,7 +1689,7 @@ void __table_log_restore_table_update(SPITupleTable *spi_tuptable, char *table_r
 
 	/* build query */
 	appendStringInfo(d_query, "UPDATE %s SET ",
-					 do_quote_ident(table_restore));
+					 table_restore);
 
 	for (j = 1; j <= number_columns; j++)
 	{
@@ -1261,9 +1729,13 @@ void __table_log_restore_table_update(SPITupleTable *spi_tuptable, char *table_r
   /* done */
 }
 
-void __table_log_restore_table_delete(SPITupleTable *spi_tuptable, char *table_restore,
-									  char *table_orig_pkey, char *col_query_start,
-									  int col_pkey, int number_columns, int i) {
+static void __table_log_restore_table_delete(SPITupleTable *spi_tuptable,
+											 char *table_restore,
+											 char *table_orig_pkey,
+											 char *col_query_start,
+											 int col_pkey,
+											 int number_columns,
+											 int i) {
 	int   ret;
 	char *tmp;
 
@@ -1284,7 +1756,7 @@ void __table_log_restore_table_delete(SPITupleTable *spi_tuptable, char *table_r
 	/* build query */
 	appendStringInfo(d_query,
 					 "DELETE FROM %s WHERE %s=%s",
-					 do_quote_ident(table_restore),
+					 table_restore,
 					 do_quote_ident(table_orig_pkey),
 					 do_quote_literal(tmp));
 
@@ -1471,7 +1943,7 @@ static char * do_quote_literal(char *lptr)
 
 #endif /* MULTIBYTE */
 
-char * __table_log_varcharout(VarChar *s)
+static char * __table_log_varcharout(VarChar *s)
 {
 	char *result;
 	int32 len;

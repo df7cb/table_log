@@ -39,12 +39,20 @@ DECLARE
     level_create text = '';
     orig_qq      text;
     log_qq       text;
+    log_part     text[];
+    log_seq      text;
     partition_mode ALIAS FOR $6;
     num_log_tables integer;
 BEGIN
+    -- Handle if someone doesn't want an explicit log table name
+    log_name := COALESCE(log_name, orig_name || '_log');
+
     -- Quoted qualified names
-    orig_qq := quote_ident(orig_schema) || '.' ||quote_ident(orig_name);
-    log_qq := quote_ident(log_schema) || '.' ||quote_ident(log_name);
+    orig_qq := quote_ident(orig_schema) || '.' || quote_ident(orig_name);
+    log_qq := quote_ident(log_schema) || '.'  || quote_ident(log_name);
+    log_seq := quote_ident(log_schema) || '.' || quote_ident(log_name || '_seq');
+    log_part[0] := quote_ident(log_schema) || '.' || quote_ident(log_name || '_0');
+    log_part[1] := quote_ident(log_schema) || '.' || quote_ident(log_name || '_1');
 
     -- Valid partition mode ?
     IF (partition_mode NOT IN ('SINGLE', 'PARTITION')) THEN
@@ -52,17 +60,26 @@ BEGIN
     END IF;
 
     IF level <> 3 THEN
-        level_create := level_create
-            || ', trigger_id BIGSERIAL NOT NULL PRIMARY KEY';
-        IF level <> 4 THEN
-            level_create := level_create
-                || ', trigger_user VARCHAR(32) NOT NULL';
-            do_log_user := 1;
-            IF level <> 5 THEN
-                RAISE EXCEPTION
-                    'table_log_init: First arg has to be 3, 4 or 5.';
-            END IF;
-        END IF;
+
+       --
+       -- Create a sequence used by trigger_id, if requested.
+       --
+       EXECUTE 'CREATE SEQUENCE ' || log_seq;
+
+       level_create := level_create
+           || ', trigger_id BIGINT'
+           || ' DEFAULT nextval($$' || log_seq || '$$::regclass)'
+           || ' NOT NULL PRIMARY KEY';
+
+       IF level <> 4 THEN
+           level_create := level_create
+               || ', trigger_user VARCHAR(32) NOT NULL';
+           do_log_user := 1;
+           IF level <> 5 THEN
+               RAISE EXCEPTION
+                   'table_log_init: First arg has to be 3, 4 or 5.';
+           END IF;
+       END IF;
     END IF;
 
     IF (partition_mode = 'SINGLE') THEN
@@ -76,7 +93,7 @@ BEGIN
 
     ELSE
         -- Partitioned mode requested...
-        EXECUTE  'CREATE TABLE ' || log_qq || '_0'
+        EXECUTE  'CREATE TABLE ' || log_part[0]
               || '(LIKE ' || orig_qq
               || ', trigger_mode VARCHAR(10) NOT NULL'
               || ', trigger_tuple VARCHAR(5) NOT NULL'
@@ -84,7 +101,7 @@ BEGIN
               || level_create
               || ')';
 
-        EXECUTE  'CREATE TABLE ' || log_qq || '_1'
+        EXECUTE  'CREATE TABLE ' || log_part[1]
               || '(LIKE ' || orig_qq
               || ', trigger_mode VARCHAR(10) NOT NULL'
               || ', trigger_tuple VARCHAR(5) NOT NULL'
@@ -92,9 +109,9 @@ BEGIN
               || level_create
               || ')';
 
-        EXECUTE 'CREATE VIEW ' || log_qq || '_v'
-              || ' AS SELECT * FROM ' || log_qq || '_0 UNION ALL '
-              || 'SELECT * FROM ' || log_qq || '_1';
+        EXECUTE 'CREATE VIEW ' || log_qq
+              || ' AS SELECT * FROM ' || log_part[0] || ' UNION ALL '
+              || 'SELECT * FROM ' || log_part[1] || '';
     END IF;
 
 
