@@ -1,7 +1,13 @@
 -- Remove old version of table_log_init()
 DROP FUNCTION table_log_init(int, text, text, text, text);
 
-CREATE OR REPLACE FUNCTION table_log_init(int, text, text, text, text, text DEFAULT 'SINGLE') RETURNS void AS
+CREATE FUNCTION table_log_basic()
+    RETURNS TRIGGER
+    AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE OR REPLACE FUNCTION table_log_init(int, text, text, text, text, text DEFAULT 'SINGLE',
+                                          boolean DEFAULT false,
+                                          text[] DEFAULT '{INSERT, UPDATE, DELETE}'::text[]) RETURNS void AS
 $table_log_init$
 DECLARE
     level        ALIAS FOR $1;
@@ -9,14 +15,19 @@ DECLARE
     orig_name    ALIAS FOR $3;
     log_schema   ALIAS FOR $4;
     log_name     ALIAS FOR $5;
+    partition_mode ALIAS FOR $6;
+    basic_mode     ALIAS FOR $7;
+    log_actions  ALIAS FOR $8;
     do_log_user  int = 0;
     level_create text = '';
     orig_qq      text;
     log_qq       text;
     log_part     text[];
     log_seq      text;
-    partition_mode ALIAS FOR $6;
     num_log_tables integer;
+    trigger_func text := 'table_log';
+    trigger_actions text := '';
+    i integer;
 BEGIN
     -- Handle if someone doesn't want an explicit log table name
     log_name := COALESCE(log_name, orig_name || '_log');
@@ -27,6 +38,11 @@ BEGIN
     log_seq := quote_ident(log_schema) || '.' || quote_ident(log_name || '_seq');
     log_part[0] := quote_ident(log_schema) || '.' || quote_ident(log_name || '_0');
     log_part[1] := quote_ident(log_schema) || '.' || quote_ident(log_name || '_1');
+
+    -- Valid trigger actions?
+    IF (COALESCE(array_length(log_actions, 1), 0) = 0) THEN
+       RAISE EXCEPTION 'table_log_init: at least one trigger action must be specified';
+    END IF;
 
     -- Valid partition mode ?
     IF (partition_mode NOT IN ('SINGLE', 'PARTITION')) THEN
@@ -88,9 +104,29 @@ BEGIN
               || 'SELECT * FROM ' || log_part[1] || '';
     END IF;
 
+    --
+    -- Either use basic or full trigger mode
+    --
+    IF basic_mode THEN
+       trigger_func := 'table_log_basic';
+    END IF;
 
-    EXECUTE 'CREATE TRIGGER "table_log_trigger" AFTER UPDATE OR INSERT OR DELETE ON '
-            || orig_qq || ' FOR EACH ROW EXECUTE PROCEDURE table_log('
+    --
+    -- Build action string for trigger DDL
+    --
+    FOR i IN 1..array_length(log_actions, 1)
+    LOOP
+
+        trigger_actions := trigger_actions || log_actions[i];
+
+        IF i < array_length(log_actions, 1) THEN
+           trigger_actions := trigger_actions || ' OR ';
+        END IF;
+
+    END LOOP;
+
+    EXECUTE 'CREATE TRIGGER "table_log_trigger" AFTER ' || trigger_actions || ' ON '
+            || orig_qq || ' FOR EACH ROW EXECUTE PROCEDURE ' || trigger_func || '('
             || quote_literal(log_name) || ','
             || do_log_user || ','
             || quote_literal(log_schema) || ','
@@ -101,4 +137,3 @@ BEGIN
 END;
 $table_log_init$
 LANGUAGE plpgsql;
-

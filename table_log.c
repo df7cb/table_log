@@ -61,6 +61,43 @@ typedef struct
 	char *relname;
 } TableLogRelIdent;
 
+/*
+ * table_log logging descriptor for log triggers.
+ */
+typedef struct
+{
+	/*
+	 * Pointer to trigger data
+	 */
+	TriggerData *trigdata;
+
+	/*
+	 * Number of columns of source table (excludes
+	 * dropped columns!)
+	 */
+	int number_columns;
+
+	/*
+	 * Number of columns of log table (excludes
+	 * dropped columns!)
+	 */
+	int number_columns_log;
+
+	/*
+	 * Name/schema of the log table
+	 */
+	TableLogRelIdent ident_log;
+
+	/*
+	 * Log session user
+	 */
+	int use_session_user;
+
+} TableLogDescr;
+
+/*
+ * table_log restore descriptor structure.
+ */
 typedef struct
 {
 	/* Non-qualified relation name
@@ -132,6 +169,33 @@ typedef struct
 	};
 } TableLogRestoreDescr;
 
+#define DESCR_TRIGDATA(a) \
+	(a).trigdata
+
+#define DESCR_TRIGDATA_GET_TUPDESC(a) \
+	(a).trigdata->tg_relation->rd_att
+
+#define DESCR_TRIGDATA_GET_RELATION(a) \
+	(a).trigdata->tg_relation
+
+#define DESCR_TRIGDATA_GETARG(a, index) \
+	(a).trigdata->tg_trigger->tgargs[(index)]
+
+#define DESCR_TRIGDATA_NARGS(a) \
+	(a).trigdata->tg_trigger->tgnargs
+
+#define DESCR_TRIGDATA_GET_TUPLE(a) \
+	(a).trigdata->tg_trigtuple
+
+#define DESCR_TRIGDATA_GET_NEWTUPLE(a) \
+	(a).trigdata->tg_newtuple
+
+#define DESCR_TRIGDATA_LOG_SCHEMA(a) \
+	(a).trigdata->tg_trigger->tgargs[2]
+
+#define DESCR_TRIGDATA_LOG_SESSION_USER(a) \
+	(a).trigdata->tg_trigger->tgargs[1]
+
 #define RESTORE_TABLE_IDENT(a, type) \
 	((a.use_schema_##type )								 \
 	 ? quote_qualified_identifier(a.ident_##type.schema, \
@@ -139,11 +203,17 @@ typedef struct
 	 : quote_identifier(a.relname_##type))
 
 void _PG_init(void);
-extern Datum table_log(PG_FUNCTION_ARGS);
+Datum table_log(PG_FUNCTION_ARGS);
+Datum table_log_basic(PG_FUNCTION_ARGS);
 Datum table_log_restore_table(PG_FUNCTION_ARGS);
 static char *do_quote_ident(char *iptr);
 static char *do_quote_literal(char *iptr);
-static void __table_log (TriggerData *trigdata, char *changed_mode, char *changed_tuple, HeapTuple tuple, int number_columns, char *log_table, int use_session_user, char *log_schema);
+static void __table_log (TableLogDescr *descr,
+						 char          *changed_mode,
+						 char          *changed_tuple,
+						 HeapTuple      tuple);
+static void table_log_prepare(TableLogDescr *descr);
+static void table_log_finalize(void);
 static void __table_log_restore_table_insert(SPITupleTable *spi_tuptable,
 											 char *table_restore,
 											 char *table_orig_pkey,
@@ -180,6 +250,7 @@ static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr);
 /* this is a V1 (new) function */
 /* the trigger function */
 PG_FUNCTION_INFO_V1(table_log);
+PG_FUNCTION_INFO_V1(table_log_forward);
 /* build only, if the 'Table Function API' is available */
 #ifdef FUNCAPI_H_not_implemented
 /* restore one single column */
@@ -260,9 +331,7 @@ static inline char *getActiveLogTable(TriggerData *tg_data)
 	{
 		/*
 		 * Append the current active partition id, if partitioning
-		 * support is used. Note that we use offset 0 for nameing the
-		 * tables, so we need to adjust the specified partition id
-		 * accordingly.
+		 * support is used.
 		 */
 		appendStringInfo(buf, "_%u", tableLogActivePartitionId);
 	}
@@ -292,28 +361,176 @@ static int count_columns (TupleDesc tupleDesc)
 	return count;
 }
 
+/*
+ * Initialize a TableLogDescr descriptor structure.
+ */
+static void initTableLogDescr(TableLogDescr *descr,
+							  TriggerData   *trigdata)
+{
+	Assert(descr != NULL);
+
+	descr->trigdata = trigdata;
+
+	descr->number_columns = -1;
+	descr->number_columns_log = -1;
+	descr->ident_log.schema   = NULL;
+	descr->ident_log.relname  = NULL;
+	descr->use_session_user   = 0;
+}
 
 /*
-table_log()
-
-trigger function for logging table changes
-
-parameter:
-  - log table name (optional)
-return:
-  - trigger data (for Pg)
-*/
-Datum table_log(PG_FUNCTION_ARGS)
+ * table_log_internal()
+ *
+ * Internal function to initialize all required stuff
+ * for table_log() or table_log_basic().
+ *
+ * Requires a TableLogDescr structure previously
+ * initialized via initTableLogDescr().
+ */
+static void table_log_prepare(TableLogDescr *descr)
 {
-	TriggerData    *trigdata = (TriggerData *) fcinfo->context;
-	int            ret;
-	StringInfo     query;
-	int            number_columns = 0;		/* counts the number columns in the table */
-	int            number_columns_log = 0;	/* counts the number columns in the table */
-	char           *orig_schema;
-	char           *log_schema;
-	char           *log_table;
-	int            use_session_user = 0;    /* should we write the current (session) user to the log table? */
+	int         ret;
+	StringInfo  query;
+
+	/* must only be called for ROW trigger */
+	if (TRIGGER_FIRED_FOR_STATEMENT(descr->trigdata->tg_event))
+	{
+		elog(ERROR, "table_log: can't process STATEMENT events");
+	}
+
+	/* must only be called AFTER */
+	if (TRIGGER_FIRED_BEFORE(descr->trigdata->tg_event))
+	{
+		elog(ERROR, "table_log: must be fired after event");
+	}
+
+	/* now connect to SPI manager */
+	ret = SPI_connect();
+
+	if (ret != SPI_OK_CONNECT)
+	{
+		elog(ERROR, "table_log: SPI_connect returned %d", ret);
+	}
+
+	elog(DEBUG2, "prechecks done, now getting original table attributes");
+
+	descr->number_columns = count_columns(DESCR_TRIGDATA_GET_TUPDESC((*descr)));
+	if (descr->number_columns < 1)
+	{
+		elog(ERROR, "table_log: number of columns in table is < 1, can this happen?");
+	}
+
+	elog(DEBUG2, "number columns in orig table: %i", descr->number_columns);
+
+	if (DESCR_TRIGDATA_NARGS((*descr)) > 4)
+	{
+		elog(ERROR, "table_log: too many arguments to trigger");
+	}
+
+	/* name of the log schema */
+	if (DESCR_TRIGDATA_NARGS((*descr)) <= 2)
+	{
+		/* if no explicit schema specified, use source table schema  */
+		descr->ident_log.schema = get_namespace_name(RelationGetNamespace(DESCR_TRIGDATA_GET_RELATION((*descr))));
+	}
+	else
+	{
+		descr->ident_log.schema  = DESCR_TRIGDATA_LOG_SCHEMA((*descr));
+	}
+
+	/* name of the log table */
+	descr->ident_log.relname = getActiveLogTable(DESCR_TRIGDATA((*descr)));
+
+	/* should we write the current user? */
+	if (DESCR_TRIGDATA_NARGS((*descr)) > 1)
+	{
+		/*
+		 * check if a second argument is given
+		 * if yes, use it, if it is true
+		 */
+		if (atoi(DESCR_TRIGDATA_LOG_SESSION_USER((*descr))) == 1)
+		{
+			descr->use_session_user = 1;
+			elog(DEBUG2, "will write session user to 'trigger_user'");
+		}
+	}
+
+	elog(DEBUG2, "log table: %s.%s",
+		 quote_identifier(descr->ident_log.schema),
+		 quote_identifier(descr->ident_log.relname));
+
+	/* get the number columns in the table */
+	query = makeStringInfo();
+	appendStringInfo(query, "%s.%s",
+					 do_quote_ident(descr->ident_log.schema),
+					 do_quote_ident(descr->ident_log.relname));
+	descr->number_columns_log = count_columns(RelationNameGetTupleDesc(query->data));
+
+	if (descr->number_columns_log < 1)
+	{
+		elog(ERROR, "could not get number columns in relation %s.%s",
+			 quote_identifier(descr->ident_log.schema),
+			 quote_identifier(descr->ident_log.relname));
+	}
+
+    elog(DEBUG2, "number columns in log table: %i",
+		 descr->number_columns_log);
+
+	/*
+	 * check if the logtable has 3 (or now 4) columns more than our table
+	 * +1 if we should write the session user
+	 */
+
+	if (descr->use_session_user == 0)
+	{
+		/* without session user */
+		if ((descr->number_columns_log != descr->number_columns + 3)
+			&& (descr->number_columns_log != descr->number_columns + 4))
+		{
+			elog(ERROR, "number colums in relation %s(%d) does not match columns in %s.%s(%d)",
+				 SPI_getrelname(DESCR_TRIGDATA_GET_RELATION((*descr))),
+				 descr->number_columns,
+				 quote_identifier(descr->ident_log.schema),
+				 quote_identifier(descr->ident_log.relname),
+				 descr->number_columns_log);
+		}
+	}
+	else
+	{
+		/* with session user */
+		if ((descr->number_columns_log != descr->number_columns + 3 + 1)
+			&& (descr->number_columns_log != descr->number_columns + 4 + 1))
+		{
+			elog(ERROR, "number colums in relation %s does not match columns in %s.%s",
+				 SPI_getrelname(DESCR_TRIGDATA_GET_RELATION((*descr))),
+				 quote_identifier(descr->ident_log.schema),
+				 quote_identifier(descr->ident_log.relname));
+		}
+	}
+
+	elog(DEBUG2, "log table OK");
+	/* For each column in key ... */
+	elog(DEBUG2, "copy data ...");
+}
+
+static void table_log_finalize()
+{
+	/* ...for now only SPI needs to be cleaned up. */
+	SPI_finish();
+}
+
+/*
+ * table_log_forward
+ *
+ * Trigger function with the same core functionality
+ * than table_log(), but without the possibility to do
+ * backward log replay. This means that OLD tuples for UPDATE
+ * actions aren't logged, which makes the log table much smaller
+ * in case someone have a heavy updated source table.
+ */
+Datum table_log_basic(PG_FUNCTION_ARGS)
+{
+	TableLogDescr  log_descr;
 
 	/*
 	 * Some checks first...
@@ -327,140 +544,45 @@ Datum table_log(PG_FUNCTION_ARGS)
 		elog(ERROR, "table_log: not fired by trigger manager");
 	}
 
-	/* must only be called for ROW trigger */
-	if (TRIGGER_FIRED_FOR_STATEMENT(trigdata->tg_event))
-	{
-		elog(ERROR, "table_log: can't process STATEMENT events");
-	}
-
-	/* must only be called AFTER */
-	if (TRIGGER_FIRED_BEFORE(trigdata->tg_event))
-	{
-		elog(ERROR, "table_log: must be fired after event");
-	}
-
-	/* now connect to SPI manager */
-	ret = SPI_connect();
-
-	if (ret != SPI_OK_CONNECT)
-	{
-		elog(ERROR, "table_log: SPI_connect returned %d", ret);
-	}
-
-	/* get schema name for the table, in case we need it later */
-	orig_schema = get_namespace_name(RelationGetNamespace(trigdata->tg_relation));
-
-	elog(DEBUG2, "prechecks done, now getting original table attributes");
-
-	number_columns = count_columns(trigdata->tg_relation->rd_att);
-	if (number_columns < 1)
-	{
-		elog(ERROR, "table_log: number of columns in table is < 1, can this happen?");
-	}
-
-	elog(DEBUG2, "number columns in orig table: %i", number_columns);
-
-	if (trigdata->tg_trigger->tgnargs > 4)
-	{
-		elog(ERROR, "table_log: too many arguments to trigger");
-	}
-
-	/* name of the log schema */
-	if (trigdata->tg_trigger->tgnargs > 2)
-	{
-		/* check if a log schema argument is given, if yes, use it */
-		log_schema = trigdata->tg_trigger->tgargs[2];
-	}
-	else
-	{
-		/* if no, use orig_schema */
-		log_schema = orig_schema;
-	}
-
-	/* should we write the current user? */
-	if (trigdata->tg_trigger->tgnargs > 1)
-	{
-		/*
-		 * check if a second argument is given
-		 * if yes, use it, if it is true
-		 */
-		if (atoi(trigdata->tg_trigger->tgargs[1]) == 1)
-		{
-			use_session_user = 1;
-			elog(DEBUG2, "will write session user to 'trigger_user'");
-		}
-	}
-
-	/* name of the log table */
-	log_table = getActiveLogTable(trigdata);
-
-	elog(DEBUG2, "log table: %s", log_table);
-
-	/* get the number columns in the table */
-	query = makeStringInfo();
-	appendStringInfo(query, "%s.%s", do_quote_ident(log_schema), do_quote_ident(log_table));
-	number_columns_log = count_columns(RelationNameGetTupleDesc(query->data));
-
-	if (number_columns_log < 1)
-	{
-		elog(ERROR, "could not get number columns in relation %s", log_table);
-	}
-
-    elog(DEBUG2, "number columns in log table: %i", number_columns_log);
+	/*
+	 * Assign trigger data structure to table log descriptor.
+	 */
+	initTableLogDescr(&log_descr,
+					  (TriggerData *) fcinfo->context);
 
 	/*
-	 * check if the logtable has 3 (or now 4) columns more than our table
-	 * +1 if we should write the session user
+	 * Do all the preparing leg work...
 	 */
+	table_log_prepare(&log_descr);
 
-	if (use_session_user == 0)
-	{
-		/* without session user */
-		if (number_columns_log != number_columns + 3 && number_columns_log != number_columns + 4)
-		{
-			elog(ERROR, "number colums in relation %s(%d) does not match columns in %s(%d)",
-				 SPI_getrelname(trigdata->tg_relation), number_columns,
-				 log_table, number_columns_log);
-		}
-	}
-	else
-	{
-		/* with session user */
-		if (number_columns_log != number_columns + 3 + 1 && number_columns_log != number_columns + 4 + 1)
-		{
-			elog(ERROR, "number colums in relation %s does not match columns in %s",
-				 SPI_getrelname(trigdata->tg_relation), log_table);
-		}
-	}
-
-	elog(DEBUG2, "log table OK");
-	/* For each column in key ... */
-	elog(DEBUG2, "copy data ...");
-
-	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+	if (TRIGGER_FIRED_BY_INSERT(DESCR_TRIGDATA(log_descr)->tg_event))
 	{
 		/* trigger called from INSERT */
 		elog(DEBUG2, "mode: INSERT -> new");
 
-		__table_log(trigdata, "INSERT", "new", trigdata->tg_trigtuple, number_columns, log_table, use_session_user, log_schema);
+		__table_log(&log_descr,
+					"INSERT",
+					"new",
+					DESCR_TRIGDATA_GET_TUPLE(log_descr));
 	}
-	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+	else if (TRIGGER_FIRED_BY_UPDATE(DESCR_TRIGDATA(log_descr)->tg_event))
 	{
-		/* trigger called from UPDATE */
-		elog(DEBUG2, "mode: UPDATE -> old");
-
-		__table_log(trigdata, "UPDATE", "old", trigdata->tg_trigtuple, number_columns, log_table, use_session_user, log_schema);
-
 		elog(DEBUG2, "mode: UPDATE -> new");
 
-		__table_log(trigdata, "UPDATE", "new", trigdata->tg_newtuple, number_columns, log_table, use_session_user, log_schema);
+		__table_log(&log_descr,
+					"UPDATE",
+					"new",
+					DESCR_TRIGDATA_GET_TUPLE(log_descr));
 	}
-	else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+	else if (TRIGGER_FIRED_BY_DELETE(DESCR_TRIGDATA(log_descr)->tg_event))
 	{
 		/* trigger called from DELETE */
 		elog(DEBUG2, "mode: DELETE -> old");
 
-		__table_log(trigdata, "DELETE", "old", trigdata->tg_trigtuple, number_columns, log_table, use_session_user, log_schema);
+		__table_log(&log_descr,
+					"DELETE",
+					"old",
+					DESCR_TRIGDATA_GET_TUPLE(log_descr));
 	}
 	else
 	{
@@ -469,11 +591,98 @@ Datum table_log(PG_FUNCTION_ARGS)
 
 	elog(DEBUG2, "cleanup, trigger done");
 
-	/* close SPI connection */
-	SPI_finish();
+	table_log_finalize();
 
 	/* return trigger data */
-	return PointerGetDatum(trigdata->tg_trigtuple);
+	return PointerGetDatum(DESCR_TRIGDATA_GET_TUPLE(log_descr));
+}
+
+/*
+table_log()
+
+trigger function for logging table changes
+
+parameter:
+  - log table name (optional)
+return:
+  - trigger data (for Pg)
+*/
+Datum table_log(PG_FUNCTION_ARGS)
+{
+	TableLogDescr  log_descr;
+
+	/*
+	 * Some checks first...
+	 */
+
+	elog(DEBUG2, "start table_log()");
+
+	/* called by trigger manager? */
+	if (!CALLED_AS_TRIGGER(fcinfo))
+	{
+		elog(ERROR, "table_log: not fired by trigger manager");
+	}
+
+	/*
+	 * Assign trigger data structure to table log descriptor.
+	 */
+	initTableLogDescr(&log_descr,
+					  (TriggerData *) fcinfo->context);
+
+	/*
+	 * Do all the preparing leg work...
+	 */
+	table_log_prepare(&log_descr);
+
+
+	if (TRIGGER_FIRED_BY_INSERT(DESCR_TRIGDATA(log_descr)->tg_event))
+	{
+		/* trigger called from INSERT */
+		elog(DEBUG2, "mode: INSERT -> new");
+
+		__table_log(&log_descr,
+					"INSERT",
+					"new",
+					DESCR_TRIGDATA_GET_TUPLE(log_descr));
+	}
+	else if (TRIGGER_FIRED_BY_UPDATE(DESCR_TRIGDATA(log_descr)->tg_event))
+	{
+		/* trigger called from UPDATE */
+		elog(DEBUG2, "mode: UPDATE -> old");
+
+		__table_log(&log_descr,
+					"UPDATE",
+					"old",
+					DESCR_TRIGDATA_GET_TUPLE(log_descr));
+
+		elog(DEBUG2, "mode: UPDATE -> new");
+
+		__table_log(&log_descr,
+					"UPDATE",
+					"new",
+					DESCR_TRIGDATA_GET_NEWTUPLE(log_descr));
+	}
+	else if (TRIGGER_FIRED_BY_DELETE(DESCR_TRIGDATA(log_descr)->tg_event))
+	{
+		/* trigger called from DELETE */
+		elog(DEBUG2, "mode: DELETE -> old");
+
+		__table_log(&log_descr,
+					"DELETE",
+					"old",
+					DESCR_TRIGDATA_GET_TUPLE(log_descr));
+	}
+	else
+	{
+		elog(ERROR, "trigger fired by unknown event");
+	}
+
+	elog(DEBUG2, "cleanup, trigger done");
+
+	table_log_finalize();
+
+	/* return trigger data */
+	return PointerGetDatum(DESCR_TRIGDATA_GET_TUPLE(log_descr));
 }
 
 /*
@@ -492,10 +701,10 @@ parameter:
 return:
   none
 */
-static void __table_log (TriggerData *trigdata, char *changed_mode,
-						 char *changed_tuple, HeapTuple tuple,
-						 int number_columns, char *log_table,
-						 int use_session_user, char *log_schema)
+static void __table_log (TableLogDescr *descr,
+						 char          *changed_mode,
+						 char          *changed_tuple,
+						 HeapTuple      tuple)
 {
 	StringInfo query;
 	char      *before_char;
@@ -511,19 +720,20 @@ static void __table_log (TriggerData *trigdata, char *changed_mode,
 
 	/* build query */
 	appendStringInfo(query, "INSERT INTO %s.%s (",
-					 do_quote_ident(log_schema), do_quote_ident(log_table));
+					 do_quote_ident(descr->ident_log.schema),
+					 do_quote_ident(descr->ident_log.relname));
 
 	/* add colum names */
 	col_nr = 0;
 
-	for (i = 1; i <= number_columns; i++)
+	for (i = 1; i <= descr->number_columns; i++)
 	{
 		col_nr++;
 		found_col = 0;
 
 		do
 		{
-			if (trigdata->tg_relation->rd_att->attrs[col_nr - 1]->attisdropped)
+			if (DESCR_TRIGDATA_GET_TUPDESC((*descr))->attrs[col_nr - 1]->attisdropped)
 			{
 				/* this column is dropped, skip it */
 				col_nr++;
@@ -538,11 +748,11 @@ static void __table_log (TriggerData *trigdata, char *changed_mode,
 
 		appendStringInfo(query,
 						 "%s, ",
-						 do_quote_ident(SPI_fname(trigdata->tg_relation->rd_att, col_nr)));
+						 do_quote_ident(SPI_fname(DESCR_TRIGDATA_GET_TUPDESC((*descr)), col_nr)));
 	}
 
 	/* add session user */
-	if (use_session_user == 1)
+	if (descr->use_session_user == 1)
 		appendStringInfo(query, "trigger_user, ");
 
 	/* add the 3 extra colum names */
@@ -550,14 +760,14 @@ static void __table_log (TriggerData *trigdata, char *changed_mode,
 
 	/* add values */
 	col_nr = 0;
-	for (i = 1; i <= number_columns; i++)
+	for (i = 1; i <= descr->number_columns; i++)
 	{
 		col_nr++;
 		found_col = 0;
 
 		do
 		{
-			if (trigdata->tg_relation->rd_att->attrs[col_nr - 1]->attisdropped)
+			if (DESCR_TRIGDATA_GET_TUPDESC((*descr))->attrs[col_nr - 1]->attisdropped)
 			{
 				/* this column is dropped, skip it */
 				col_nr++;
@@ -570,7 +780,10 @@ static void __table_log (TriggerData *trigdata, char *changed_mode,
 		}
 		while (found_col == 0);
 
-		before_char = SPI_getvalue(tuple, trigdata->tg_relation->rd_att, col_nr);
+		before_char = SPI_getvalue(tuple,
+								   DESCR_TRIGDATA_GET_TUPDESC((*descr)),
+								   col_nr);
+
 		if (before_char == NULL)
 		{
 			appendStringInfo(query, "NULL, ");
@@ -583,12 +796,13 @@ static void __table_log (TriggerData *trigdata, char *changed_mode,
 	}
 
 	/* add session user */
-	if (use_session_user == 1)
+	if (descr->use_session_user == 1)
 		appendStringInfo(query, "SESSION_USER, ");
 
 	/* add the 3 extra values */
 	appendStringInfo(query, "%s, %s, NOW());",
-					 do_quote_literal(changed_mode), do_quote_literal(changed_tuple));
+					 do_quote_literal(changed_mode),
+					 do_quote_literal(changed_tuple));
 
 	elog(DEBUG3, "query: %s", query->data);
 	elog(DEBUG2, "execute query");
@@ -597,7 +811,10 @@ static void __table_log (TriggerData *trigdata, char *changed_mode,
 	ret = SPI_exec(query->data, 0);
 	if (ret != SPI_OK_INSERT)
 	{
-		elog(ERROR, "could not insert log information into relation %s (error: %d)", log_table, ret);
+		elog(ERROR, "could not insert log information into relation %s.%s (error: %d)",
+			 quote_identifier(descr->ident_log.schema),
+			 quote_identifier(descr->ident_log.relname),
+			 ret);
 	}
 
 	/* clean up */

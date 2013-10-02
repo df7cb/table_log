@@ -219,5 +219,48 @@ SELECT id, name FROM log."Test_recover";
 DROP SCHEMA log CASCADE;
 DROP TABLE test;
 
+--
+-- Test basic log mode
+--
+CREATE SCHEMA log;
+
+CREATE TABLE test(id integer, name text);
+ALTER TABLE test ADD PRIMARY KEY(id);
+
+-- this should fail, no trigger actions specified
+SELECT table_log_init(5, 'public', 'test', 'log', NULL, 'PARTITION', true, '{}');
+
+-- this should succeed, but leave out inserts
+-- generate the log table this time...
+SELECT table_log_init(5, 'public', 'test', 'log', NULL, 'PARTITION', true, '{UPDATE, DELETE}');
+
+\dt log.*
+
+SET table_log.active_partition = 0;
+
+INSERT INTO test VALUES(1, 'joe');
+INSERT INTO test VALUES(2, 'barney');
+INSERT INTO test VALUES(3, 'monica');
+
+SET table_log.active_partition = 1;
+
+UPDATE test SET name = 'veronica' WHERE id = 3;
+
+SELECT * FROM test;
+DELETE FROM test WHERE id = 1;
+SELECT * FROM test;
+
+-- UPDATE logged only, but only new tuples
+SELECT id, name FROM log.test_log;
+SELECT id, name FROM log.test_log_0;
+SELECT id, name FROM log.test_log_1;
+
+-- NOTE:
+--    We don't test table_log_restore_table() at this point, since
+--    restore from data collected by table_log_basic() is not yet supported.
+
+DROP SCHEMA log CASCADE;
+DROP TABLE test;
+
 RESET client_min_messages;
 
