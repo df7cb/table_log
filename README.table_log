@@ -90,6 +90,9 @@ After this you have to create some new functions:
   but versions < 7.4 are no longer supported
 
 
+CREATE FUNCTION "table_log_basic" ()
+    RETURNS trigger
+    AS '$libdir/table_log', 'table_log' LANGUAGE 'C';
 CREATE FUNCTION "table_log" ()
     RETURNS trigger
     AS '$libdir/table_log', 'table_log' LANGUAGE 'C';
@@ -170,11 +173,25 @@ The function can be used with the following parameters:
     log the changes in table tableschema.tablename into the log table
     logschema.logname.
 
-  table_log_init(ncols, tableschema, tablename, logschema, logname, partition_mode):
+  table_log_init(ncols, tableschema, tablename, logschema, logname, partition_mode, basic_mode, log_actions):
     log the changes in table tableschema.tablename into the log table
     logschema.logname. The parameter partition_mode can be SINGLE or PARTITION, which
     creates two log tables *_0 and *_1 which can be switched by setting
     table_log.active_partition to the corresponding partition id 1 or 2.
+    basic_mode defines wether we use full logging mode or basic mode. When set to TRUE,
+    table_log_basic() will be used internally which suppresses logging of OLD values
+    by UPDATE actions.
+    log_actions is a TEXT[] array which specifies a list of either INSERT, DELETE or UPDATE
+    or any combinations from them to tell when a table_log trigger should be fired.
+
+    NOTE:
+
+    When using basic_mode and/or log_actions without all actions, you won't be
+    able to use table_log_restore_table() anymore.
+
+    When calling table_log_init(), you can omit logname in any case. The function
+    will then generate a log tablename from the given source tablename and a
+    '_log' string appended.
 
 4.1. Manual table log and trigger creation
 
