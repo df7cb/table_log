@@ -465,7 +465,7 @@ SELECT * FROM test;
   3 | veronica
 (2 rows)
 
--- UPDATE logged only, but only new tuples
+-- UPDATE logged only, but only old tuples
 SELECT id, name FROM log.test_log;
  id |  name  
 ----+--------

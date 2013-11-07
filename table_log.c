@@ -524,7 +524,7 @@ static void table_log_finalize()
  *
  * Trigger function with the same core functionality
  * than table_log(), but without the possibility to do
- * backward log replay. This means that OLD tuples for UPDATE
+ * backward log replay. This means that NEW tuples for UPDATE
  * actions aren't logged, which makes the log table much smaller
  * in case someone have a heavy updated source table.
  */
@@ -567,11 +567,11 @@ Datum table_log_basic(PG_FUNCTION_ARGS)
 	}
 	else if (TRIGGER_FIRED_BY_UPDATE(DESCR_TRIGDATA(log_descr)->tg_event))
 	{
-		elog(DEBUG2, "mode: UPDATE -> new");
+		elog(DEBUG2, "mode: UPDATE -> old");
 
 		__table_log(&log_descr,
 					"UPDATE",
-					"new",
+					"old",
 					DESCR_TRIGDATA_GET_TUPLE(log_descr));
 	}
 	else if (TRIGGER_FIRED_BY_DELETE(DESCR_TRIGDATA(log_descr)->tg_event))

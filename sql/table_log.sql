@@ -250,7 +250,7 @@ SELECT * FROM test;
 DELETE FROM test WHERE id = 1;
 SELECT * FROM test;
 
--- UPDATE logged only, but only new tuples
+-- UPDATE logged only, but only old tuples
 SELECT id, name FROM log.test_log;
 SELECT id, name FROM log.test_log_0;
 SELECT id, name FROM log.test_log_1;

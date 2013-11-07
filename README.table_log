@@ -179,7 +179,7 @@ The function can be used with the following parameters:
     creates two log tables *_0 and *_1 which can be switched by setting
     table_log.active_partition to the corresponding partition id 1 or 2.
     basic_mode defines wether we use full logging mode or basic mode. When set to TRUE,
-    table_log_basic() will be used internally which suppresses logging of OLD values
+    table_log_basic() will be used internally which suppresses logging of NEW values
     by UPDATE actions.
     log_actions is a TEXT[] array which specifies a list of either INSERT, DELETE or UPDATE
     or any combinations from them to tell when a table_log trigger should be fired.
