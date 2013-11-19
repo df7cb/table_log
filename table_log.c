@@ -908,7 +908,10 @@ static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr)
 		 * unique constraint.
 		 */
 		if (!indexStruct->indisprimary)
+		{
+			ReleaseSysCache(indexTuple);
 			continue;
+		}
 
 		/*
 		 * Okay, looks like this is a PK let's
@@ -922,6 +925,8 @@ static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr)
 		{
 			restore_descr->orig_pk_attnum[i] = indexStruct->indkey.values[i];
 		}
+
+		ReleaseSysCache(indexTuple);
 	}
 
 	/*
