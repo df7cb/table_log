@@ -187,7 +187,9 @@ CREATE TABLE test(id integer, name text);
 ALTER TABLE test ADD PRIMARY KEY(id);
 SELECT table_log_init(5, 'public', 'test', 'log', 'Test', 'PARTITION');
 
-\dt log.*
+-- Check for log partitions
+SELECT 'log."Test_0"'::regclass;
+SELECT 'log."Test_1"'::regclass;
 
 SET table_log.active_partition = 0;
 
@@ -234,7 +236,9 @@ SELECT table_log_init(5, 'public', 'test', 'log', NULL, 'PARTITION', true, '{}')
 -- generate the log table this time...
 SELECT table_log_init(5, 'public', 'test', 'log', NULL, 'PARTITION', true, '{UPDATE, DELETE}');
 
-\dt log.*
+-- Log partitions created?
+SELECT 'log.test_log_0'::regclass;
+SELECT 'log.test_log_1'::regclass;
 
 SET table_log.active_partition = 0;
 
