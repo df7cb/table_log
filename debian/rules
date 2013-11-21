@@ -16,3 +16,12 @@ override_dh_auto_install:
 
 %:
 	dh $@ 
+
+VERSION=$(shell dpkg-parsechangelog | sed -ne 's/Version: \(.*\)-.*/\1/p')
+origtargz: clean
+	rm -rf .orig
+	mkdir -p .orig/tablelog-$(VERSION)
+	cp -a * .orig/tablelog-$(VERSION)
+	rm -rf .orig/tablelog-$(VERSION)/debian
+	cd .orig && tar cfz ../../tablelog_$(VERSION).orig.tar.gz *
+	rm -rf .orig
