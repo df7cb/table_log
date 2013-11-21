@@ -2,11 +2,12 @@ Source: tablelog
 Section: database
 Priority: optional
 Maintainer: Christoph Berg <christoph.berg@credativ.de>
-Build-Depends: debhelper (>= 9.0.0), postgresql-server-dev-all
+Build-Depends: debhelper (>= 9.0.0), postgresql-server-dev-all (>= 148~)
 Standards-Version: 3.9.5
 Homepage: http://pgfoundry.org/projects/tablelog/
 #Vcs-Git: git://git.debian.org/collab-maint/tablelog.git
 #Vcs-Browser: http://git.debian.org/?p=collab-maint/tablelog.git;a=summary
+XS-Testsuite: autopkgtest
 
 Package: postgresql-PGVERSION-tablelog
 Architecture: any
