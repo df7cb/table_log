@@ -31,6 +31,10 @@
 #include <utils/syscache.h>
 #include "funcapi.h"
 
+#if PG_VERSION_NUM >= 90300
+#include "access/htup_details.h"
+#endif
+
 /* for PostgreSQL >= 8.2.x */
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -201,6 +205,12 @@ typedef struct
 	 ? quote_qualified_identifier(a.ident_##type.schema, \
 								  a.ident_##type.relname)\
 	 : quote_identifier(a.relname_##type))
+
+#if PG_VERSION_NUM < 90300
+#define TABLE_LOG_NSPOID(a) LookupExplicitNamespace((a));
+#else
+#define TABLE_LOG_NSPOID(a) LookupExplicitNamespace((a), false);
+#endif
 
 void _PG_init(void);
 Datum table_log(PG_FUNCTION_ARGS);
@@ -1014,7 +1024,7 @@ static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
 	}
 
 	/*
-	 * Lookup OID of log table. LookupExplicitNamespace()
+	 * Lookup OID of log table. TABLE_LOG_NSPOID()
 	 * takes care wether we have at least USAGE on the specified
 	 * namespace. We don't need to do that in case we have a
 	 * non-qualified relation.
@@ -1023,7 +1033,7 @@ static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
 	{
 		Oid nspOid;
 
-		nspOid = LookupExplicitNamespace(restore_descr->ident_log.schema);
+		nspOid = TABLE_LOG_NSPOID((restore_descr->ident_log.schema));
 		restore_descr->log_relid = get_relname_relid(restore_descr->ident_log.relname,
 													 nspOid);
 	}
@@ -1039,7 +1049,7 @@ static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
 	{
 		Oid nspOid;
 
-		nspOid = LookupExplicitNamespace(restore_descr->ident_restore.schema);
+		nspOid = TABLE_LOG_NSPOID((restore_descr->ident_restore.schema));
 		restore_descr->restore_relid = get_relname_relid(restore_descr->ident_restore.relname,
 														 nspOid);
 	}
