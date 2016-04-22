@@ -2054,7 +2054,7 @@ static char * do_quote_literal(char *lptr)
 	{
 		if (*lptr == '\'')
 		{
-			*result++ = '\\';
+			*result++ = '\'';
 		}
 
 		if (*lptr == '\\')
@@ -2148,7 +2148,7 @@ static char * do_quote_literal(char *lptr)
 
 		if (*lptr == '\'')
 		{
-			*result++ = '\\';
+			*result++ = '\'';
 		}
 
 		if (*lptr == '\\')
