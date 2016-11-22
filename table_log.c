@@ -1619,9 +1619,6 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 			 RESTORE_TABLE_IDENT(restore_descr, restore));
 	}
 
-	if (method == 1)
-		elog(DEBUG2, "%i rows copied", SPI_processed);
-
 	/* get timestamp as string */
 	timestamp_string = DatumGetCString(DirectFunctionCall1(timestamptz_out, timestamp));
 
@@ -1684,8 +1681,6 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 		elog(ERROR, "could not get log data from table: %s",
 			 RESTORE_TABLE_IDENT(restore_descr, log));
 	}
-
-	elog(DEBUG2, "number log entries to restore: %i", SPI_processed);
 
 	results = SPI_processed;
 	/* save results */
