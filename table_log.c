@@ -967,6 +967,19 @@ static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
 	restore_descr->orig_relname        = pstrdup(table_orig);
 
 	/*
+	 * Keep gcc quiet.
+	 * In table_log_restore_table() we call RESTORE_TABLE_IDENT,
+	 * which lets gcc guess that we might get into trouble if
+	 * the restore descriptor was not fully initialized.*
+	 *
+	 * However, we already make sure that RESTORE_TABLE_IDENT
+	 * won't be called with ident_[restore|log].relname unless
+	 * use_schema_log or use_schema_restore is set to false.
+	 */
+	restore_descr->ident_log.relname   = NULL;
+	restore_descr->ident_restore.relname = NULL;
+
+	/*
 	 * Take care for possible schema qualified relation names
 	 * in table_log and table_restore. table_orig is assumed to
 	 * be search_path aware!
