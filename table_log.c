@@ -260,6 +260,7 @@ static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr);
 /* this is a V1 (new) function */
 /* the trigger function */
 PG_FUNCTION_INFO_V1(table_log);
+PG_FUNCTION_INFO_V1(table_log_basic);
 PG_FUNCTION_INFO_V1(table_log_forward);
 /* build only, if the 'Table Function API' is available */
 #ifdef FUNCAPI_H_not_implemented
