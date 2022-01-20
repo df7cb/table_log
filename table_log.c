@@ -35,6 +35,11 @@
 #include "access/htup_details.h"
 #endif
 
+#if PG_VERSION_NUM < 100000
+/* from src/include/access/tupdesc.h, introduced in 2cd708452 */
+#define TupleDescAttr(tupdesc, i) ((tupdesc)->attrs[(i)])
+#endif
+
 /* for PostgreSQL >= 8.2.x */
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -363,7 +368,7 @@ static int count_columns (TupleDesc tupleDesc)
 
 	for (i = 0; i < tupleDesc->natts; ++i)
 	{
-		if (!tupleDesc->attrs[i]->attisdropped)
+		if (!TupleDescAttr(tupleDesc, i)->attisdropped)
 		{
 			++count;
 		}
@@ -744,7 +749,7 @@ static void __table_log (TableLogDescr *descr,
 
 		do
 		{
-			if (DESCR_TRIGDATA_GET_TUPDESC((*descr))->attrs[col_nr - 1]->attisdropped)
+			if (TupleDescAttr(DESCR_TRIGDATA_GET_TUPDESC(*descr), col_nr - 1)->attisdropped)
 			{
 				/* this column is dropped, skip it */
 				col_nr++;
@@ -778,7 +783,7 @@ static void __table_log (TableLogDescr *descr,
 
 		do
 		{
-			if (DESCR_TRIGDATA_GET_TUPDESC((*descr))->attrs[col_nr - 1]->attisdropped)
+			if (TupleDescAttr(DESCR_TRIGDATA_GET_TUPDESC(*descr), col_nr - 1)->attisdropped)
 			{
 				/* this column is dropped, skip it */
 				col_nr++;
