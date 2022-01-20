@@ -1,3 +1,9 @@
+tablelog (0.6.3-1) unstable; urgency=medium
+
+  * Fix error in table_log_restore_table.
+
+ -- Christoph Berg <myon@debian.org>  Thu, 20 Jan 2022 16:10:34 +0100
+
 tablelog (0.6.2-1) unstable; urgency=medium
 
   * New upstream version.
