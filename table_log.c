@@ -35,6 +35,10 @@
 #include "access/htup_details.h"
 #endif
 
+#if PG_VERSION_NUM >= 120000
+#include "access/table.h"
+#endif
+
 #if PG_VERSION_NUM < 100000
 /* from src/include/access/tupdesc.h, introduced in 2cd708452 */
 #define TupleDescAttr(tupdesc, i) ((tupdesc)->attrs[(i)])
@@ -898,7 +902,11 @@ static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr)
 	 * Get all indexes for the relation, take care to
 	 * request a share lock before.
 	 */
+#if PG_VERSION_NUM >= 120000
+	origRel = table_open(restore_descr->orig_relid, AccessShareLock);
+#else
 	origRel = heap_open(restore_descr->orig_relid, AccessShareLock);
+#endif
 
 	indexOidList = RelationGetIndexList(origRel);
 
@@ -948,7 +956,11 @@ static void getRelationPrimaryKeyColumns(TableLogRestoreDescr *restore_descr)
 	/*
 	 * Okay, we're done. Cleanup and exit.
 	 */
+#if PG_VERSION_NUM >= 120000
+	table_close(origRel, AccessShareLock);
+#else
 	heap_close(origRel, AccessShareLock);
+#endif
 }
 
 static void setTableLogRestoreDescr(TableLogRestoreDescr *restore_descr,
