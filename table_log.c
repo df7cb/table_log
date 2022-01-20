@@ -1174,8 +1174,13 @@ static void mapPrimaryKeyColumnNames(TableLogRestoreDescr *restore_descr)
 		/*
 		 * Lookup the pk attribute name.
 		 */
-		char *pk_attr_name = pstrdup(get_relid_attribute_name(restore_descr->orig_relid,
-															  restore_descr->orig_pk_attnum[i]));
+		char *pk_attr_name = pstrdup(
+#if PG_VERSION_NUM >= 110000
+						get_attname(restore_descr->orig_relid, restore_descr->orig_pk_attnum[i], false)
+#else
+						get_relid_attribute_name(restore_descr->orig_relid, restore_descr->orig_pk_attnum[i])
+#endif
+						);
 
 		restore_descr->orig_pk_attr_names = lappend(restore_descr->orig_pk_attr_names,
 													pk_attr_name);
