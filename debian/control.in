@@ -1,19 +1,19 @@
 Source: tablelog
 Section: database
 Priority: optional
-Maintainer: Christoph Berg <christoph.berg@credativ.de>
-Build-Depends: debhelper (>= 9.0.0), postgresql-server-dev-all (>= 148~)
-Standards-Version: 3.9.5
-Homepage: http://pgfoundry.org/projects/tablelog/
-#Vcs-Git: git://git.debian.org/collab-maint/tablelog.git
-#Vcs-Browser: http://git.debian.org/?p=collab-maint/tablelog.git;a=summary
-XS-Testsuite: autopkgtest
+Maintainer: Debian PostgreSQL Maintainers <team+postgresql@tracker.debian.org>
+Uploaders: Christoph Berg <myon@debian.org>
+Build-Depends: debhelper-compat (= 13), postgresql-all (>= 217~)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+Homepage: https://github.com/credativ/table_log
+Vcs-Git: https://github.com/credativ/table_log.git
+Vcs-Browser: https://github.com/credativ/table_log
 
 Package: postgresql-PGVERSION-tablelog
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, postgresql-PGVERSION
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${postgresql:Depends}
 Description: log changes on tables and restore tables to point in time
- PostgreSQL Table Log uses a trigger to log any INSERTs, UPDATEs and DELETEs on
- a specific table into another table. The second part of tablelog is able to
- restore the state of the original table or of a specific row for any time in
+ table_log is a PostgreSQL extension with a set of functions to log changes on
+ a table and to restore the state of the table or a specific row on any time in
  the past.

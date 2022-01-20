@@ -2,10 +2,4 @@
 
 set -e
 
-for v in $(pg_buildext supported-versions); do
-	if ! pg_virtualenv -v $v \
-		make installcheck PG_CONFIG=/usr/lib/postgresql/$v/bin/pg_config; then
-			head -n 500 regression.diffs
-			exit 1
-	fi
-done
+pg_buildext installcheck

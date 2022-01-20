@@ -1,27 +1,4 @@
 #!/usr/bin/make -f
 
-include /usr/share/postgresql-common/pgxs_debian_control.mk
-clean: debian/control
-.PHONY: debian/control
-
-override_dh_auto_clean:
-	$(MAKE) clean
-	rm -rf build-* debian/postgresql-*
-
-override_dh_auto_build:
-	+pg_buildext build build-%v
-
-override_dh_auto_install:
-	+pg_buildext install build-%v postgresql-%v-tablelog
-
 %:
-	dh $@ 
-
-VERSION=$(shell dpkg-parsechangelog | sed -ne 's/Version: \(.*\)-.*/\1/p')
-origtargz: clean
-	rm -rf .orig
-	mkdir -p .orig/tablelog-$(VERSION)
-	cp -a * .orig/tablelog-$(VERSION)
-	rm -rf .orig/tablelog-$(VERSION)/debian
-	cd .orig && tar cfz ../../tablelog_$(VERSION).orig.tar.gz *
-	rm -rf .orig
+	dh $@ --with pgxs

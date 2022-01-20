@@ -1,10 +1,10 @@
-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: tablelog
-Source: http://pgfoundry.org/projects/tablelog/
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: table_log
+Source: https://github.com/credativ/table_log
 
 Files: *
 Copyright: (c) 2002-2007  Andreas Scherbaum
-License:
+License: ads
  Basically it's the same as the PostgreSQL license (BSD license).
  .
  Permission to use, copy, modify, and distribute this software and
@@ -19,15 +19,5 @@ License:
  is" without express or implied warranty.
 
 Files: debian/*
-Copyright: 2013 Christoph Berg <christoph.berg@credativ.de>
-License:
- Permission to use, copy, modify, and distribute this software and
- its documentation for any purpose and without fee is hereby
- granted, provided that the above copyright notice appear in all
- copies and that both that copyright notice and this permission
- notice appear in supporting documentation, and that the name of the
- author not be used in advertising or publicity pertaining to
- distribution of the software without specific, written prior
- permission. The author makes no representations about the
- suitability of this software for any purpose. It is provided "as
- is" without express or implied warranty.
+Copyright: 2013, 2022 Christoph Berg <myon@debian.org>
+License: ads
