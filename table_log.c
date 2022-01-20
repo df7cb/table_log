@@ -1290,7 +1290,6 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	char           *trigger_tuple;
 	char           *trigger_changed;
 	SPITupleTable  *spi_tuptable = NULL;          /* for saving query results */
-	VarChar        *return_name;
 
 	/* memory for dynamic query */
 	StringInfo      d_query;
@@ -1865,16 +1864,8 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 	elog(DEBUG2, "table_log_restore_table() done, results in: %s",
 		 RESTORE_TABLE_IDENT(restore_descr, restore));
 
-	/* convert string to VarChar for result */
-	return_name = DatumGetVarCharP(DirectFunctionCall2(varcharin,
-													   CStringGetDatum(RESTORE_TABLE_IDENT(restore_descr,
-																						   restore)),
-													   Int32GetDatum(strlen(RESTORE_TABLE_IDENT(restore_descr,
-																								restore))
-																	 + VARHDRSZ)));
-
 	/* and return the name of the restore table */
-	PG_RETURN_VARCHAR_P(return_name);
+	PG_RETURN_VARCHAR_P(CStringGetTextDatum(RESTORE_TABLE_IDENT(restore_descr, restore)));
 }
 
 static void __table_log_restore_table_insert(SPITupleTable *spi_tuptable,
