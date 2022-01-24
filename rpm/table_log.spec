@@ -1,3 +1,5 @@
+# rpmbuild -D'pgmajorversion 14' -D'pginstdir /usr/pgsql-14' -ba rpm/table_log.spec
+
 %global debug_package %{nil}
 %global sname table_log
 
@@ -29,7 +31,7 @@ a table and to restore the state of the table or a specific row on any time in
 the past.
 
 %prep
-%setup -q -n postgresql-table_log-%{version}
+%setup -q -n table_log-%{version}
 
 %build
 %if 0%{?rhel} && 0%{?rhel} == 7
@@ -51,12 +53,9 @@ USE_PGXS=1 PATH=%{pginstdir}/bin/:$PATH %{__make} DESTDIR=%{buildroot} %{?_smp_m
 
 %files
 %defattr(644,root,root,755)
-%doc %{pginstdir}/doc/extension/*%{sname}.md
-%if 0%{?rhel} && 0%{?rhel} <= 6
-%doc LICENSE
-%else
-%license LICENSE
-%endif
+%doc %{pginstdir}/doc/extension/table_log.md
+%{pginstdir}/lib/table_log*
+%{pginstdir}/lib/bitcode/table_log*
 %{pginstdir}/share/extension/table_log*.sql*
 %{pginstdir}/share/extension/table_log.control
 
