@@ -5,6 +5,12 @@ Source: https://github.com/credativ/table_log
 Files: *
 Copyright: (c) 2002-2007  Andreas Scherbaum
 License: ads
+
+Files: debian/*
+Copyright: 2013, 2022 Christoph Berg <myon@debian.org>
+License: ads
+
+License: ads
  Basically it's the same as the PostgreSQL license (BSD license).
  .
  Permission to use, copy, modify, and distribute this software and
@@ -17,7 +23,3 @@ License: ads
  permission. The author makes no representations about the
  suitability of this software for any purpose. It is provided "as
  is" without express or implied warranty.
-
-Files: debian/*
-Copyright: 2013, 2022 Christoph Berg <myon@debian.org>
-License: ads

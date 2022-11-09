@@ -1,3 +1,9 @@
+tablelog (0.6.3-2) unstable; urgency=medium
+
+  * Upload for PostgreSQL 15.
+
+ -- Christoph Berg <myon@debian.org>  Wed, 09 Nov 2022 13:53:50 +0100
+
 tablelog (0.6.3-1) unstable; urgency=medium
 
   * Fix error in table_log_restore_table.

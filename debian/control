@@ -10,7 +10,7 @@ Homepage: https://github.com/credativ/table_log
 Vcs-Git: https://github.com/credativ/table_log.git
 Vcs-Browser: https://github.com/credativ/table_log
 
-Package: postgresql-14-tablelog
+Package: postgresql-15-tablelog
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, ${postgresql:Depends}
 Description: log changes on tables and restore tables to point in time
