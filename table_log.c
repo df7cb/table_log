@@ -1865,7 +1865,7 @@ Datum table_log_restore_table(PG_FUNCTION_ARGS)
 		 RESTORE_TABLE_IDENT(restore_descr, restore));
 
 	/* and return the name of the restore table */
-	PG_RETURN_VARCHAR_P(CStringGetTextDatum(RESTORE_TABLE_IDENT(restore_descr, restore)));
+	PG_RETURN_VARCHAR_P(cstring_to_text(RESTORE_TABLE_IDENT(restore_descr, restore)));
 }
 
 static void __table_log_restore_table_insert(SPITupleTable *spi_tuptable,
