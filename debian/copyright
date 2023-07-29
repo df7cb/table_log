@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: table_log
-Source: https://github.com/credativ/table_log
+Source: https://github.com/df7cb/table_log
 
 Files: *
 Copyright: (c) 2002-2007  Andreas Scherbaum

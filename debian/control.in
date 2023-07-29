@@ -6,9 +6,9 @@ Uploaders: Christoph Berg <myon@debian.org>
 Build-Depends: debhelper-compat (= 13), postgresql-all (>= 217~)
 Standards-Version: 4.6.0
 Rules-Requires-Root: no
-Homepage: https://github.com/credativ/table_log
-Vcs-Git: https://github.com/credativ/table_log.git
-Vcs-Browser: https://github.com/credativ/table_log
+Homepage: https://github.com/df7cb/table_log
+Vcs-Git: https://github.com/df7cb/table_log.git
+Vcs-Browser: https://github.com/df7cb/table_log
 
 Package: postgresql-PGVERSION-tablelog
 Architecture: any

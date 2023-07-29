@@ -14,8 +14,8 @@ Name:		%{sname}_%{pgmajorversion}
 Version:	0.6.3
 Release:	1%{?dist}
 License:	BSD
-Source0:	https://github.com/credativ/table_log/archive/v%{version}.tar.gz
-URL:		https://github.com/credativ/table_log/
+Source0:	https://github.com/df7cb/table_log/archive/v%{version}.tar.gz
+URL:		https://github.com/df7cb/table_log/
 BuildRequires:	postgresql%{pgmajorversion}-devel pgdg-srpm-macros
 Requires:	postgresql%{pgmajorversion}-server
 
