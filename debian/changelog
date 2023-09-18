@@ -1,3 +1,9 @@
+tablelog (0.6.4-2) unstable; urgency=medium
+
+  * Upload for PostgreSQL 16.
+
+ -- Christoph Berg <myon@debian.org>  Mon, 18 Sep 2023 22:39:10 +0200
+
 tablelog (0.6.4-1) unstable; urgency=medium
 
   * Fix compatibility with PG16.
