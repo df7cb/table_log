@@ -2,9 +2,14 @@ Source: tablelog
 Section: database
 Priority: optional
 Maintainer: Debian PostgreSQL Maintainers <team+postgresql@tracker.debian.org>
-Uploaders: Christoph Berg <myon@debian.org>
-Build-Depends: debhelper-compat (= 13), postgresql-all (>= 217~)
-Standards-Version: 4.6.2
+Uploaders:
+ Christoph Berg <myon@debian.org>,
+Build-Depends:
+ architecture-is-64-bit <!pkg.postgresql.32-bit>,
+ debhelper-compat (= 13),
+ postgresql-all <!nocheck>,
+ postgresql-server-dev-all,
+Standards-Version: 4.7.0
 Rules-Requires-Root: no
 Homepage: https://github.com/df7cb/table_log
 Vcs-Git: https://github.com/df7cb/table_log.git
@@ -12,7 +17,10 @@ Vcs-Browser: https://github.com/df7cb/table_log
 
 Package: postgresql-PGVERSION-tablelog
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, ${postgresql:Depends}
+Depends:
+ ${misc:Depends},
+ ${postgresql:Depends},
+ ${shlibs:Depends},
 Description: log changes on tables and restore tables to point in time
  table_log is a PostgreSQL extension with a set of functions to log changes on
  a table and to restore the state of the table or a specific row on any time in
