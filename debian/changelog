@@ -1,3 +1,11 @@
+tablelog (0.6.4-4) unstable; urgency=medium
+
+  * Upload for PostgreSQL 18. (Closes: #1117339)
+  * Add ${postgresql:Breaks}.
+  * debian/tests: Depend on postgresql-common-dev instead of 'make'.
+
+ -- Christoph Berg <myon@debian.org>  Thu, 09 Oct 2025 00:04:54 +0200
+
 tablelog (0.6.4-3) unstable; urgency=medium
 
   * Upload for PostgreSQL 17.
